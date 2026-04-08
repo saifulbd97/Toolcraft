@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "PDF Merger"
+version = "1.0.0"
+id = "artifacts/pdf-merger"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21640
+
+[services.development]
+run = "pnpm --filter @workspace/pdf-merger run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/pdf-merger", "run", "build" ]
+publicDir = "artifacts/pdf-merger/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21640"
+BASE_PATH = "/"

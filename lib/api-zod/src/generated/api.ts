@@ -14,3 +14,11 @@ import * as zod from "zod";
 export const HealthCheckResponse = zod.object({
   status: zod.string(),
 });
+
+/**
+ * Upload multiple PDF files and receive a merged PDF
+ * @summary Merge multiple PDFs
+ */
+export const MergePdfsBody = zod.object({
+  files: zod.array(zod.instanceof(File)),
+});

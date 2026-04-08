@@ -16,6 +16,18 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **API codegen**: Orval (from OpenAPI spec)
 - **Build**: esbuild (CJS bundle)
 
+## Artifacts
+
+### PDF Merger (`artifacts/pdf-merger`)
+- React + Vite single-page app at preview path `/`
+- Allows users to upload multiple PDFs, reorder them, and merge into one downloadable PDF
+- Uses drag-and-drop with Framer Motion for file upload and reordering
+
+### API Server (`artifacts/api-server`)
+- Express 5 backend at `/api`
+- PDF merge route: `POST /api/pdf/merge` — accepts multipart/form-data with `files[]` field
+- Uses `pdf-lib` for PDF merging and `multer` for file uploads
+
 ## Key Commands
 
 - `pnpm run typecheck` — full typecheck across all packages
