@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "@/lib/i18n";
 
 function formatFileSize(bytes: number) {
   if (bytes === 0) return "0 Bytes";
@@ -24,12 +25,6 @@ interface CompressResult {
   reduced: boolean;
 }
 
-const qualityOptions: { value: Quality; label: string; description: string }[] = [
-  { value: "low", label: "Strong", description: "Smallest file, lower image quality" },
-  { value: "medium", label: "Balanced", description: "Good balance of size and quality" },
-  { value: "high", label: "High quality", description: "Minimal size reduction, best quality" },
-];
-
 export default function Compress() {
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -39,22 +34,28 @@ export default function Compress() {
   const [quality, setQuality] = useState<Quality>("medium");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
+  const { t } = useTranslation();
+
+  const qualityOptions: { value: Quality; label: string; description: string }[] = [
+    { value: "low", label: t.qualityLow, description: t.qualityLowDesc },
+    { value: "medium", label: t.qualityMedium, description: t.qualityMediumDesc },
+    { value: "high", label: t.qualityHigh, description: t.qualityHighDesc },
+  ];
 
   const loadFile = useCallback((f: File) => {
     if (f.type !== "application/pdf") {
-      toast({ title: "Invalid file type", description: "Please upload a PDF file.", variant: "destructive" });
+      toast({ title: t.invalidFileType, description: t.invalidFileTypePdf, variant: "destructive" });
       return;
     }
     setFile(f);
     setResult(null);
     setError(null);
-  }, [toast]);
+  }, [toast, t]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); }, []);
   const handleDragLeave = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(false); }, []);
   const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
+    e.preventDefault(); setIsDragging(false);
     const f = e.dataTransfer.files[0];
     if (f) loadFile(f);
   }, [loadFile]);
@@ -70,34 +71,27 @@ export default function Compress() {
     setIsProcessing(true);
     setError(null);
     setResult(null);
-
     try {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("quality", quality);
-
       const response = await fetch("/api/pdf/compress", { method: "POST", body: formData });
-
       if (!response.ok) {
         const err = await response.json();
         throw new Error(err.error || "Failed to compress PDF");
       }
-
       const originalSize = parseInt(response.headers.get("X-Original-Size") || "0", 10);
       const compressedSize = parseInt(response.headers.get("X-Compressed-Size") || "0", 10);
-
       const blob = await response.blob();
       const downloadUrl = URL.createObjectURL(blob);
-
       const finalOriginal = originalSize || file.size;
       const finalCompressed = compressedSize || blob.size;
       const reduced = finalCompressed < finalOriginal;
-
       setResult({ originalSize: finalOriginal, compressedSize: finalCompressed, downloadUrl, reduced });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "An unexpected error occurred";
       setError(msg);
-      toast({ title: "Compression failed", description: msg, variant: "destructive" });
+      toast({ title: t.compressFailed, description: msg, variant: "destructive" });
     } finally {
       setIsProcessing(false);
     }
@@ -121,12 +115,12 @@ export default function Compress() {
     <div className="min-h-[100dvh] w-full bg-background flex flex-col items-center py-12 px-4 sm:px-6 lg:px-8">
       <div className="w-full max-w-2xl space-y-8">
         <div className="flex items-center">
-          <Link href="/"><Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground hover:text-foreground -ml-2" data-testid="button-back-home"><ArrowLeft className="w-4 h-4" />All tools</Button></Link>
+          <Link href="/"><Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground hover:text-foreground -ml-2" data-testid="button-back-home"><ArrowLeft className="w-4 h-4" />{t.allTools}</Button></Link>
         </div>
 
         <div className="text-center space-y-2">
-          <h1 className="text-4xl font-semibold tracking-tight text-foreground">Compress PDF</h1>
-          <p className="text-muted-foreground text-lg">Reduce your PDF file size while keeping it readable.</p>
+          <h1 className="text-4xl font-semibold tracking-tight text-foreground">{t.compressTitle}</h1>
+          <p className="text-muted-foreground text-lg">{t.compressSubtitle}</p>
         </div>
 
         {!file ? (
@@ -135,9 +129,7 @@ export default function Compress() {
               isDragging ? "border-sky-400 bg-sky-50/50" : "border-border hover:border-sky-300 hover:bg-muted/50"
             )}
             onClick={() => fileInputRef.current?.click()}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
+            onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}
             data-testid="upload-zone"
           >
             <input type="file" accept="application/pdf" className="hidden" ref={fileInputRef} onChange={handleFileInput} data-testid="input-file" />
@@ -146,8 +138,8 @@ export default function Compress() {
                 <FileUp className="h-8 w-8" />
               </div>
               <div className="space-y-1">
-                <p className="text-base font-medium text-foreground">Drag & drop a PDF here</p>
-                <p className="text-sm text-muted-foreground">PDF only — or click to browse</p>
+                <p className="text-base font-medium text-foreground">{t.compressDrop}</p>
+                <p className="text-sm text-muted-foreground">{t.compressDropSub}</p>
               </div>
             </div>
           </Card>
@@ -159,22 +151,19 @@ export default function Compress() {
                 <p className="text-sm font-medium text-foreground truncate">{file.name}</p>
                 <p className="text-xs text-muted-foreground">{formatFileSize(file.size)}</p>
               </div>
-              {!result && <Button variant="ghost" size="sm" onClick={reset} className="text-muted-foreground shrink-0" data-testid="button-change-file">Change</Button>}
+              {!result && <Button variant="ghost" size="sm" onClick={reset} className="text-muted-foreground shrink-0" data-testid="button-change-file">{t.change}</Button>}
             </div>
 
             {!result && (
               <div className="space-y-3">
-                <p className="text-sm font-medium text-foreground">Compression level</p>
+                <p className="text-sm font-medium text-foreground">{t.compressionLevel}</p>
                 <div className="grid grid-cols-3 gap-3">
                   {qualityOptions.map((opt) => (
                     <button
                       key={opt.value}
                       onClick={() => setQuality(opt.value)}
-                      className={cn(
-                        "rounded-xl border-2 p-3 text-left transition-all",
-                        quality === opt.value
-                          ? "border-sky-500 bg-sky-50"
-                          : "border-border bg-card hover:border-sky-200 hover:bg-muted/40"
+                      className={cn("rounded-xl border-2 p-3 text-left transition-all",
+                        quality === opt.value ? "border-sky-500 bg-sky-50" : "border-border bg-card hover:border-sky-200 hover:bg-muted/40"
                       )}
                       data-testid={`quality-${opt.value}`}
                     >
@@ -190,28 +179,27 @@ export default function Compress() {
               <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                 className="bg-sky-50 border border-sky-200 rounded-xl p-5 space-y-4">
                 <div className="flex items-center gap-2 text-sky-700 font-medium">
-                  <CheckCircle2 className="h-5 w-5" />
-                  Compression complete
+                  <CheckCircle2 className="h-5 w-5" />{t.compressionComplete}
                 </div>
                 <div className="grid grid-cols-3 gap-4 text-center">
                   <div>
-                    <p className="text-xs text-muted-foreground mb-1">Original</p>
+                    <p className="text-xs text-muted-foreground mb-1">{t.original}</p>
                     <p className="text-sm font-semibold text-foreground">{formatFileSize(result.originalSize)}</p>
                   </div>
                   <div>
-                    <p className="text-xs text-muted-foreground mb-1">Compressed</p>
+                    <p className="text-xs text-muted-foreground mb-1">{t.compressed}</p>
                     <p className="text-sm font-semibold text-foreground">{formatFileSize(result.compressedSize)}</p>
                   </div>
                   <div>
-                    <p className="text-xs text-muted-foreground mb-1">Saved</p>
+                    <p className="text-xs text-muted-foreground mb-1">{t.saved}</p>
                     <p className="text-sm font-semibold text-sky-600">{savings}%</p>
                   </div>
                 </div>
                 <div className="flex gap-3 pt-1">
                   <Button className="flex-1 bg-sky-500 hover:bg-sky-600 text-white" onClick={triggerDownload} data-testid="button-download">
-                    <Download className="mr-2 h-4 w-4" />Download compressed PDF
+                    <Download className="mr-2 h-4 w-4" />{t.downloadCompressed}
                   </Button>
-                  <Button variant="outline" onClick={reset} data-testid="button-start-over">Compress another</Button>
+                  <Button variant="outline" onClick={reset} data-testid="button-start-over">{t.compressAnother}</Button>
                 </div>
               </motion.div>
             )}
@@ -220,32 +208,25 @@ export default function Compress() {
               <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                 className="bg-amber-50 border border-amber-200 rounded-xl p-5 space-y-3">
                 <div className="flex items-center gap-2 text-amber-700 font-medium">
-                  <Info className="h-5 w-5" />
-                  File is already optimized
+                  <Info className="h-5 w-5" />{t.alreadyOptimized}
                 </div>
-                <p className="text-sm text-amber-800">
-                  This PDF could not be reduced further — it's already well-compressed. Try the <strong>Strong</strong> compression level for a more aggressive attempt.
-                </p>
+                <p className="text-sm text-amber-800">{t.alreadyOptimizedDesc}</p>
                 <div className="grid grid-cols-2 gap-4 text-center pt-1">
                   <div>
-                    <p className="text-xs text-muted-foreground mb-1">Original</p>
+                    <p className="text-xs text-muted-foreground mb-1">{t.original}</p>
                     <p className="text-sm font-semibold text-foreground">{formatFileSize(result.originalSize)}</p>
                   </div>
                   <div>
-                    <p className="text-xs text-muted-foreground mb-1">After compression</p>
+                    <p className="text-xs text-muted-foreground mb-1">{t.afterCompression}</p>
                     <p className="text-sm font-semibold text-foreground">{formatFileSize(result.compressedSize)}</p>
                   </div>
                 </div>
                 <div className="flex gap-3 pt-1">
-                  <Button variant="outline" onClick={reset} data-testid="button-start-over">Try another file</Button>
+                  <Button variant="outline" onClick={reset} data-testid="button-start-over">{t.tryAnotherFile}</Button>
                   {quality !== "low" && (
-                    <Button
-                      variant="outline"
-                      className="border-amber-300 text-amber-700 hover:bg-amber-100"
-                      onClick={() => { setQuality("low"); setResult(null); }}
-                      data-testid="button-try-stronger"
-                    >
-                      Try stronger compression
+                    <Button variant="outline" className="border-amber-300 text-amber-700 hover:bg-amber-100"
+                      onClick={() => { setQuality("low"); setResult(null); }} data-testid="button-try-stronger">
+                      {t.tryStronger}
                     </Button>
                   )}
                 </div>
@@ -260,7 +241,7 @@ export default function Compress() {
 
             {!result && (
               <Button size="lg" className="w-full sm:w-auto font-medium bg-sky-500 hover:bg-sky-600 text-white" onClick={handleCompress} disabled={isProcessing} data-testid="button-compress">
-                {isProcessing ? <><Loader2 className="mr-2 h-5 w-5 animate-spin" />Compressing...</> : <><FileArchive className="mr-2 h-5 w-5" />Compress PDF</>}
+                {isProcessing ? <><Loader2 className="mr-2 h-5 w-5 animate-spin" />{t.compressing}</> : <><FileArchive className="mr-2 h-5 w-5" />{t.compressBtn}</>}
               </Button>
             )}
           </div>
