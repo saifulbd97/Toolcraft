@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef } from "react";
+import { Link } from "wouter";
 import { Reorder, AnimatePresence, motion } from "framer-motion";
-import { FileUp, File as FileIcon, Image, X, GripVertical, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { FileUp, File as FileIcon, Image, X, GripVertical, CheckCircle2, AlertCircle, Loader2, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
@@ -169,6 +170,15 @@ export default function Home() {
   return (
     <div className="min-h-[100dvh] w-full bg-background flex flex-col items-center py-12 px-4 sm:px-6 lg:px-8">
       <div className="w-full max-w-2xl space-y-8">
+        <div className="flex items-center mb-2">
+          <Link href="/">
+            <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground hover:text-foreground -ml-2" data-testid="button-back-home">
+              <ArrowLeft className="w-4 h-4" />
+              All tools
+            </Button>
+          </Link>
+        </div>
+
         <div className="text-center space-y-2">
           <h1 className="text-4xl font-semibold tracking-tight text-foreground">Merge PDFs</h1>
           <p className="text-muted-foreground text-lg">
