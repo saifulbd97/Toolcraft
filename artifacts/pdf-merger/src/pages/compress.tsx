@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef } from "react";
 import { Link } from "wouter";
 import { motion } from "framer-motion";
-import { FileUp, File as FileIcon, FileArchive, CheckCircle2, AlertCircle, Loader2, ArrowLeft, Download } from "lucide-react";
+import { FileUp, File as FileIcon, FileArchive, CheckCircle2, AlertCircle, Loader2, ArrowLeft, Download, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
@@ -15,11 +15,20 @@ function formatFileSize(bytes: number) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
+type Quality = "low" | "medium" | "high";
+
 interface CompressResult {
   originalSize: number;
   compressedSize: number;
   downloadUrl: string;
+  reduced: boolean;
 }
+
+const qualityOptions: { value: Quality; label: string; description: string }[] = [
+  { value: "low", label: "Strong", description: "Smallest file, lower image quality" },
+  { value: "medium", label: "Balanced", description: "Good balance of size and quality" },
+  { value: "high", label: "High quality", description: "Minimal size reduction, best quality" },
+];
 
 export default function Compress() {
   const [file, setFile] = useState<File | null>(null);
@@ -27,6 +36,7 @@ export default function Compress() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<CompressResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [quality, setQuality] = useState<Quality>("medium");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
@@ -64,6 +74,7 @@ export default function Compress() {
     try {
       const formData = new FormData();
       formData.append("file", file);
+      formData.append("quality", quality);
 
       const response = await fetch("/api/pdf/compress", { method: "POST", body: formData });
 
@@ -78,8 +89,11 @@ export default function Compress() {
       const blob = await response.blob();
       const downloadUrl = URL.createObjectURL(blob);
 
-      setResult({ originalSize: originalSize || file.size, compressedSize: compressedSize || blob.size, downloadUrl });
-      toast({ title: "Compressed!", description: "Your PDF has been compressed and is ready to download." });
+      const finalOriginal = originalSize || file.size;
+      const finalCompressed = compressedSize || blob.size;
+      const reduced = finalCompressed < finalOriginal;
+
+      setResult({ originalSize: finalOriginal, compressedSize: finalCompressed, downloadUrl, reduced });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "An unexpected error occurred";
       setError(msg);
@@ -99,7 +113,9 @@ export default function Compress() {
 
   const reset = () => { setFile(null); setResult(null); setError(null); };
 
-  const savings = result ? Math.round((1 - result.compressedSize / result.originalSize) * 100) : 0;
+  const savings = result && result.reduced
+    ? Math.round((1 - result.compressedSize / result.originalSize) * 100)
+    : 0;
 
   return (
     <div className="min-h-[100dvh] w-full bg-background flex flex-col items-center py-12 px-4 sm:px-6 lg:px-8">
@@ -146,7 +162,31 @@ export default function Compress() {
               {!result && <Button variant="ghost" size="sm" onClick={reset} className="text-muted-foreground shrink-0" data-testid="button-change-file">Change</Button>}
             </div>
 
-            {result && (
+            {!result && (
+              <div className="space-y-3">
+                <p className="text-sm font-medium text-foreground">Compression level</p>
+                <div className="grid grid-cols-3 gap-3">
+                  {qualityOptions.map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setQuality(opt.value)}
+                      className={cn(
+                        "rounded-xl border-2 p-3 text-left transition-all",
+                        quality === opt.value
+                          ? "border-sky-500 bg-sky-50"
+                          : "border-border bg-card hover:border-sky-200 hover:bg-muted/40"
+                      )}
+                      data-testid={`quality-${opt.value}`}
+                    >
+                      <p className={cn("text-sm font-medium", quality === opt.value ? "text-sky-700" : "text-foreground")}>{opt.label}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{opt.description}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {result && result.reduced && (
               <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                 className="bg-sky-50 border border-sky-200 rounded-xl p-5 space-y-4">
                 <div className="flex items-center gap-2 text-sky-700 font-medium">
@@ -164,9 +204,7 @@ export default function Compress() {
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Saved</p>
-                    <p className={cn("text-sm font-semibold", savings > 0 ? "text-sky-600" : "text-muted-foreground")}>
-                      {savings > 0 ? `${savings}%` : "Already optimized"}
-                    </p>
+                    <p className="text-sm font-semibold text-sky-600">{savings}%</p>
                   </div>
                 </div>
                 <div className="flex gap-3 pt-1">
@@ -174,6 +212,42 @@ export default function Compress() {
                     <Download className="mr-2 h-4 w-4" />Download compressed PDF
                   </Button>
                   <Button variant="outline" onClick={reset} data-testid="button-start-over">Compress another</Button>
+                </div>
+              </motion.div>
+            )}
+
+            {result && !result.reduced && (
+              <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+                className="bg-amber-50 border border-amber-200 rounded-xl p-5 space-y-3">
+                <div className="flex items-center gap-2 text-amber-700 font-medium">
+                  <Info className="h-5 w-5" />
+                  File is already optimized
+                </div>
+                <p className="text-sm text-amber-800">
+                  This PDF could not be reduced further — it's already well-compressed. Try the <strong>Strong</strong> compression level for a more aggressive attempt.
+                </p>
+                <div className="grid grid-cols-2 gap-4 text-center pt-1">
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Original</p>
+                    <p className="text-sm font-semibold text-foreground">{formatFileSize(result.originalSize)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">After compression</p>
+                    <p className="text-sm font-semibold text-foreground">{formatFileSize(result.compressedSize)}</p>
+                  </div>
+                </div>
+                <div className="flex gap-3 pt-1">
+                  <Button variant="outline" onClick={reset} data-testid="button-start-over">Try another file</Button>
+                  {quality !== "low" && (
+                    <Button
+                      variant="outline"
+                      className="border-amber-300 text-amber-700 hover:bg-amber-100"
+                      onClick={() => { setQuality("low"); setResult(null); }}
+                      data-testid="button-try-stronger"
+                    >
+                      Try stronger compression
+                    </Button>
+                  )}
                 </div>
               </motion.div>
             )}

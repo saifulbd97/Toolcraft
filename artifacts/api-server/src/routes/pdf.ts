@@ -2,6 +2,11 @@ import { Router } from "express";
 import multer from "multer";
 import { PDFDocument } from "pdf-lib";
 import JSZip from "jszip";
+import { spawn } from "child_process";
+import { writeFile, readFile, unlink } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import { randomUUID } from "crypto";
 
 const router = Router();
 
@@ -181,6 +186,9 @@ router.post("/pdf/split", pdfOnly.single("file"), async (req, res) => {
 });
 
 router.post("/pdf/compress", pdfOnly.single("file"), async (req, res) => {
+  const tmpIn = join(tmpdir(), `pdf-in-${randomUUID()}.pdf`);
+  const tmpOut = join(tmpdir(), `pdf-out-${randomUUID()}.pdf`);
+
   try {
     const file = req.file;
     if (!file) {
@@ -188,20 +196,49 @@ router.post("/pdf/compress", pdfOnly.single("file"), async (req, res) => {
       return;
     }
 
+    const quality = (req.body.quality as string) || "medium";
+    const gsSettings =
+      quality === "low" ? "/screen" : quality === "high" ? "/printer" : "/ebook";
+
     const originalSize = file.buffer.length;
-    const pdf = await PDFDocument.load(file.buffer);
-    const compressed = await pdf.save({ useObjectStreams: true });
-    const compressedSize = compressed.length;
+    await writeFile(tmpIn, file.buffer);
+
+    await new Promise<void>((resolve, reject) => {
+      const gs = spawn("gs", [
+        "-sDEVICE=pdfwrite",
+        "-dCompatibilityLevel=1.4",
+        `-dPDFSETTINGS=${gsSettings}`,
+        "-dNOPAUSE",
+        "-dQUIET",
+        "-dBATCH",
+        "-dDetectDuplicateImages=true",
+        "-dCompressFonts=true",
+        "-dEmbedAllFonts=true",
+        `-sOutputFile=${tmpOut}`,
+        tmpIn,
+      ]);
+      gs.on("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Ghostscript exited with code ${code}`));
+      });
+      gs.on("error", reject);
+    });
+
+    const compressedBuffer = await readFile(tmpOut);
+    const compressedSize = compressedBuffer.length;
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", 'attachment; filename="compressed.pdf"');
     res.setHeader("X-Original-Size", originalSize.toString());
     res.setHeader("X-Compressed-Size", compressedSize.toString());
     res.setHeader("Access-Control-Expose-Headers", "X-Original-Size, X-Compressed-Size");
-    res.send(Buffer.from(compressed));
+    res.send(compressedBuffer);
   } catch (err) {
     req.log.error({ err }, "Failed to compress PDF");
     res.status(500).json({ error: "Failed to compress PDF. Please ensure it is a valid PDF file." });
+  } finally {
+    await unlink(tmpIn).catch(() => {});
+    await unlink(tmpOut).catch(() => {});
   }
 });
 
