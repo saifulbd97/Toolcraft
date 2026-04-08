@@ -1,18 +1,32 @@
 import React, { useState, useCallback, useRef } from "react";
 import { Reorder, AnimatePresence, motion } from "framer-motion";
-import { FileUp, File as FileIcon, X, GripVertical, CheckCircle2, AlertCircle, Loader2, Download } from "lucide-react";
+import { FileUp, File as FileIcon, Image, X, GripVertical, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
-interface PdfFile {
+const ACCEPTED_TYPES = new Set(["application/pdf", "image/jpeg", "image/png"]);
+
+interface UploadedFile {
   id: string;
   file: File;
 }
 
+function getFileIcon(type: string) {
+  if (type === "application/pdf") return <FileIcon className="h-5 w-5" />;
+  return <Image className="h-5 w-5" />;
+}
+
+function getFileTypeBadge(type: string) {
+  if (type === "application/pdf") return "PDF";
+  if (type === "image/jpeg") return "JPG";
+  if (type === "image/png") return "PNG";
+  return "FILE";
+}
+
 export default function Home() {
-  const [files, setFiles] = useState<PdfFile[]>([]);
+  const [files, setFiles] = useState<UploadedFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [isMerging, setIsMerging] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
@@ -33,20 +47,20 @@ export default function Home() {
   }, []);
 
   const addFiles = useCallback((newFiles: File[]) => {
-    const pdfs = newFiles.filter((file) => file.type === "application/pdf");
-    
-    if (pdfs.length < newFiles.length) {
+    const valid = newFiles.filter((file) => ACCEPTED_TYPES.has(file.type));
+
+    if (valid.length < newFiles.length) {
       toast({
         title: "Invalid file type",
-        description: "Only PDF files are allowed.",
+        description: "Only PDF, JPG, and PNG files are supported.",
         variant: "destructive",
       });
     }
 
-    if (pdfs.length > 0) {
+    if (valid.length > 0) {
       setFiles((prev) => [
         ...prev,
-        ...pdfs.map((file) => ({
+        ...valid.map((file) => ({
           id: Math.random().toString(36).substring(7),
           file,
         })),
@@ -61,9 +75,7 @@ export default function Home() {
       e.preventDefault();
       e.stopPropagation();
       setIsDragging(false);
-      
-      const droppedFiles = Array.from(e.dataTransfer.files);
-      addFiles(droppedFiles);
+      addFiles(Array.from(e.dataTransfer.files));
     },
     [addFiles]
   );
@@ -72,7 +84,6 @@ export default function Home() {
     (e: React.ChangeEvent<HTMLInputElement>) => {
       if (e.target.files) {
         addFiles(Array.from(e.target.files));
-        // Reset input so the same file can be uploaded again if removed
         if (fileInputRef.current) {
           fileInputRef.current.value = "";
         }
@@ -99,8 +110,8 @@ export default function Home() {
     if (files.length < 2) {
       toast({
         title: "More files needed",
-        description: "Please upload at least 2 PDF files to merge.",
-        variant: "destructive"
+        description: "Please upload at least 2 files to merge.",
+        variant: "destructive",
       });
       return;
     }
@@ -120,7 +131,7 @@ export default function Home() {
 
       if (!response.ok) {
         const err = await response.json();
-        throw new Error(err.error || "Failed to merge PDFs");
+        throw new Error(err.error || "Failed to merge files");
       }
 
       const blob = await response.blob();
@@ -130,17 +141,18 @@ export default function Home() {
       a.download = "merged.pdf";
       a.click();
       URL.revokeObjectURL(url);
-      
+
       setIsSuccess(true);
       toast({
         title: "Success",
-        description: "PDFs merged successfully. Download started.",
+        description: "Files merged successfully. Download started.",
       });
-    } catch (err: any) {
-      setError(err.message || "An unexpected error occurred");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "An unexpected error occurred";
+      setError(message);
       toast({
         title: "Merge failed",
-        description: err.message || "An unexpected error occurred",
+        description: message,
         variant: "destructive",
       });
     } finally {
@@ -159,10 +171,12 @@ export default function Home() {
       <div className="w-full max-w-2xl space-y-8">
         <div className="text-center space-y-2">
           <h1 className="text-4xl font-semibold tracking-tight text-foreground">Merge PDFs</h1>
-          <p className="text-muted-foreground text-lg">Combine multiple PDF files into one document, quickly and securely.</p>
+          <p className="text-muted-foreground text-lg">
+            Combine PDFs and images (JPG, PNG) into one document, quickly and securely.
+          </p>
         </div>
 
-        <Card 
+        <Card
           className={cn(
             "p-8 border-2 border-dashed transition-colors duration-200 ease-in-out cursor-pointer relative overflow-hidden group",
             isDragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/50 hover:bg-muted/50"
@@ -176,7 +190,7 @@ export default function Home() {
           <input
             type="file"
             multiple
-            accept="application/pdf"
+            accept="application/pdf,image/jpeg,image/png"
             className="hidden"
             ref={fileInputRef}
             onChange={handleFileInput}
@@ -188,10 +202,10 @@ export default function Home() {
             </div>
             <div className="space-y-1">
               <p className="text-base font-medium text-foreground">
-                Drag & drop PDFs here
+                Drag & drop PDFs or images here
               </p>
               <p className="text-sm text-muted-foreground">
-                or click to browse from your computer
+                Supports PDF, JPG, and PNG — or click to browse
               </p>
             </div>
           </div>
@@ -203,9 +217,7 @@ export default function Home() {
               <h2 className="text-sm font-medium text-foreground">
                 Files to merge ({files.length})
               </h2>
-              <span className="text-xs text-muted-foreground">
-                Drag to reorder
-              </span>
+              <span className="text-xs text-muted-foreground">Drag to reorder</span>
             </div>
 
             <Reorder.Group
@@ -230,12 +242,17 @@ export default function Home() {
                       <GripVertical className="h-5 w-5" />
                     </div>
                     <div className="h-10 w-10 shrink-0 rounded bg-primary/10 flex items-center justify-center text-primary">
-                      <FileIcon className="h-5 w-5" />
+                      {getFileIcon(file.file.type)}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-foreground truncate">
-                        {file.file.name}
-                      </p>
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-foreground truncate">
+                          {file.file.name}
+                        </p>
+                        <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                          {getFileTypeBadge(file.file.type)}
+                        </span>
+                      </div>
                       <p className="text-xs text-muted-foreground">
                         {formatFileSize(file.file.size)}
                       </p>
@@ -255,18 +272,18 @@ export default function Home() {
             </Reorder.Group>
 
             {error && (
-              <motion.div 
+              <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
                 className="bg-destructive/10 text-destructive text-sm p-3 rounded-lg flex items-center gap-2"
               >
-                <AlertCircle className="h-4 w-4" />
+                <AlertCircle className="h-4 w-4 shrink-0" />
                 {error}
               </motion.div>
             )}
 
             {isSuccess && (
-              <motion.div 
+              <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: "auto" }}
                 className="bg-primary/10 text-primary text-sm p-4 rounded-lg flex items-center justify-between"
@@ -297,7 +314,7 @@ export default function Home() {
                 ) : (
                   <>
                     <FileIcon className="mr-2 h-5 w-5" />
-                    Merge PDFs
+                    Merge Files
                   </>
                 )}
               </Button>
