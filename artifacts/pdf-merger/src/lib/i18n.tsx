@@ -99,6 +99,19 @@ export interface Translations {
   splitRangeToastDesc: (from: string, to: string) => string;
   splitFailed: string;
   compressFailed: string;
+  // PDF to JPG page
+  pdfToJpgTitle: string;
+  pdfToJpgSubtitle: string;
+  pdfToJpgDrop: string;
+  pdfToJpgDropSub: string;
+  convertToJpg: string;
+  convertingToJpg: string;
+  pdfToJpgSuccess: (n: number) => string;
+  pdfToJpgAnother: string;
+  downloadAll: string;
+  downloadPage: (n: number) => string;
+  pdfToJpgFailed: string;
+  pdfToJpgPage: (n: number) => string;
 }
 
 const en: Translations = {
@@ -192,6 +205,18 @@ const en: Translations = {
   splitRangeToastDesc: (from, to) => `Pages ${from}–${to} extracted as a PDF.`,
   splitFailed: "Split failed",
   compressFailed: "Compression failed",
+  pdfToJpgTitle: "PDF to JPG",
+  pdfToJpgSubtitle: "Convert every PDF page into a high-quality JPG image.",
+  pdfToJpgDrop: "Drag & drop a PDF here",
+  pdfToJpgDropSub: "PDF only — or click to browse",
+  convertToJpg: "Convert to JPG",
+  convertingToJpg: "Converting...",
+  pdfToJpgSuccess: (n) => `${n} page${n !== 1 ? "s" : ""} converted successfully`,
+  pdfToJpgAnother: "Convert another",
+  downloadAll: "Download all as ZIP",
+  downloadPage: (n) => `Download page ${n}`,
+  pdfToJpgFailed: "Conversion failed",
+  pdfToJpgPage: (n) => `Page ${n}`,
 };
 
 const bn: Translations = {
@@ -285,6 +310,18 @@ const bn: Translations = {
   splitRangeToastDesc: (from, to) => `পৃষ্ঠা ${from}–${to} পিডিএফে বের করা হয়েছে।`,
   splitFailed: "বিভক্ত ব্যর্থ",
   compressFailed: "কম্প্রেশন ব্যর্থ",
+  pdfToJpgTitle: "পিডিএফ থেকে JPG",
+  pdfToJpgSubtitle: "প্রতিটি পিডিএফ পৃষ্ঠাকে উচ্চমানের JPG ছবিতে রূপান্তর করুন।",
+  pdfToJpgDrop: "পিডিএফ এখানে টেনে আনুন",
+  pdfToJpgDropSub: "শুধু PDF — বা ক্লিক করে ব্রাউজ করুন",
+  convertToJpg: "JPG-তে রূপান্তর করুন",
+  convertingToJpg: "রূপান্তর হচ্ছে...",
+  pdfToJpgSuccess: (n) => `${n}টি পৃষ্ঠা সফলভাবে রূপান্তরিত হয়েছে`,
+  pdfToJpgAnother: "আরেকটি রূপান্তর করুন",
+  downloadAll: "সব ZIP হিসেবে ডাউনলোড করুন",
+  downloadPage: (n) => `পৃষ্ঠা ${n} ডাউনলোড করুন`,
+  pdfToJpgFailed: "রূপান্তর ব্যর্থ",
+  pdfToJpgPage: (n) => `পৃষ্ঠা ${n}`,
 };
 
 const translations: Record<Lang, Translations> = { en, bn };

@@ -3,7 +3,7 @@ import multer from "multer";
 import { PDFDocument } from "pdf-lib";
 import JSZip from "jszip";
 import { spawn } from "child_process";
-import { writeFile, readFile, unlink } from "fs/promises";
+import { writeFile, readFile, unlink, mkdir, readdir, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
@@ -242,4 +242,67 @@ router.post("/pdf/compress", pdfOnly.single("file"), async (req, res) => {
   }
 });
 
+router.post("/pdf/pdf-to-jpg", pdfOnly.single("file"), async (req, res) => {
+  const tmpIn = join(tmpdir(), `pdf-in-${randomUUID()}.pdf`);
+  const tmpOut = join(tmpdir(), `pdf2jpg-${randomUUID()}`);
+
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ error: "Please upload a PDF file" });
+      return;
+    }
+
+    await writeFile(tmpIn, file.buffer);
+    await mkdir(tmpOut, { recursive: true });
+
+    const outPrefix = join(tmpOut, "page");
+
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn("pdftoppm", [
+        "-jpeg",
+        "-jpegopt", "quality=92",
+        "-r", "150",
+        tmpIn,
+        outPrefix,
+      ]);
+      proc.on("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`pdftoppm exited with code ${code}`));
+      });
+      proc.on("error", reject);
+    });
+
+    const filenames = (await readdir(tmpOut))
+      .filter((f) => f.endsWith(".jpg") || f.endsWith(".jpeg") || f.endsWith(".ppm"))
+      .sort();
+
+    if (filenames.length === 0) {
+      throw new Error("No pages were extracted from the PDF");
+    }
+
+    const zip = new JSZip();
+    for (const filename of filenames) {
+      const imgBuffer = await readFile(join(tmpOut, filename));
+      const safeName = filename.replace(/\.ppm$/, ".jpg");
+      zip.file(safeName, imgBuffer);
+    }
+
+    const zipBuffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", 'attachment; filename="pages.zip"');
+    res.setHeader("X-Page-Count", filenames.length.toString());
+    res.setHeader("Access-Control-Expose-Headers", "X-Page-Count");
+    res.send(zipBuffer);
+  } catch (err) {
+    req.log.error({ err }, "Failed to convert PDF to JPG");
+    res.status(500).json({ error: "Failed to convert PDF to images. Please ensure it is a valid PDF file." });
+  } finally {
+    await unlink(tmpIn).catch(() => {});
+    await rm(tmpOut, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
 export default router;
+
