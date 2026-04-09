@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState } from "react";
+import React, { createContext, useContext, useState, useEffect } from "react";
 
 export type Lang = "en" | "bn";
 
@@ -302,8 +302,22 @@ const LangContext = createContext<LangContextType>({
 });
 
 export function LanguageProvider({ children }: { children: React.ReactNode }) {
-  const [lang, setLang] = useState<Lang>("en");
+  const [lang, setLang] = useState<Lang>(() => {
+    try {
+      const saved = localStorage.getItem("pdf-tools-lang");
+      if (saved === "en" || saved === "bn") return saved;
+    } catch {}
+    return "en";
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("pdf-tools-lang", lang);
+    } catch {}
+  }, [lang]);
+
   const toggleLang = () => setLang((l) => (l === "en" ? "bn" : "en"));
+
   return (
     <LangContext.Provider value={{ lang, t: translations[lang], toggleLang }}>
       {children}
