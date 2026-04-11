@@ -44,6 +44,15 @@ Thumbs.db
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
 
+# Environment
+.env
+.env.local
+.env.*.local
+
+# SQLite databases
+*.db
+database.db
+
 # Replit
 .cache/
 .local/

@@ -1,6 +1,7 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import passport from "passport";
+import path from "path";
 import pinoHttp from "pino-http";
 import { createSessionMiddleware } from "./middleware/session";
 import router from "./routes";
@@ -33,6 +34,7 @@ app.use(
 const allowedOrigins = [
   /\.replit\.dev$/,
   /\.replit\.app$/,
+  /\.onrender\.com$/,
   /^http:\/\/localhost/,
 ];
 
@@ -57,5 +59,14 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 app.use("/api", router);
+
+// In production, serve the built React frontend and handle SPA routing
+if (process.env.NODE_ENV === "production") {
+  const staticDir = path.resolve(__dirname, "../../pdf-merger/dist/public");
+  app.use(express.static(staticDir));
+  app.get(/^(?!\/api).*/, (_req, res) => {
+    res.sendFile(path.join(staticDir, "index.html"));
+  });
+}
 
 export default app;

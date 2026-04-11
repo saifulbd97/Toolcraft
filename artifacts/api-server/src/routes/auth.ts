@@ -6,6 +6,9 @@ const GOOGLE_CLIENT_ID = process.env["GOOGLE_CLIENT_ID"]!;
 const GOOGLE_CLIENT_SECRET = process.env["GOOGLE_CLIENT_SECRET"]!;
 
 const getCallbackURL = () => {
+  // Production (Render, etc.): set APP_URL=https://your-app.onrender.com
+  if (process.env["APP_URL"]) return `${process.env["APP_URL"]}/api/auth/google/callback`;
+  // Replit dev environment
   const domain = process.env["REPLIT_DEV_DOMAIN"] || process.env["REPLIT_DOMAINS"]?.split(",")[0];
   if (domain) return `https://${domain}/api/auth/google/callback`;
   return "http://localhost:8080/api/auth/google/callback";
