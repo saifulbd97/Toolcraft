@@ -49,7 +49,7 @@ const categories: CategoryCard[] = [
     borderHover: "hover:border-amber-200",
     shadowHover: "hover:shadow-amber-100",
     barColor: "bg-amber-500",
-    available: false,
+    available: true,
   },
   {
     key: "incomeCalc",
