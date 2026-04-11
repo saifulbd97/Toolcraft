@@ -10,27 +10,32 @@ import { Button } from "@/components/ui/button";
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Pt { x: number; y: number }
 type Corners = [Pt, Pt, Pt, Pt];
-type Phase = "loading" | "idle" | "scanning" | "captured" | "result";
-type EnhanceMode = "original" | "clean" | "strong_bw";
+type Phase = "idle" | "scanning" | "captured" | "result";
+type EnhanceMode = "original" | "clean" | "bw";
 type ScannerMode = "document" | "id" | "receipt" | "qr";
 
 const MODE_META: Record<ScannerMode, { label: string; defaultEnhance: EnhanceMode; hint: string }> = {
-  document: { label: "Document Scan",  defaultEnhance: "clean",      hint: "Point at a document — edges highlight automatically" },
-  id:       { label: "ID Card",        defaultEnhance: "original",   hint: "Align your ID card with the yellow guide" },
-  receipt:  { label: "Receipt",        defaultEnhance: "clean",      hint: "Hold the receipt upright within the guide" },
-  qr:       { label: "QR Code",        defaultEnhance: "original",   hint: "Point camera at a QR code to scan instantly" },
+  document: { label: "Document Scan", defaultEnhance: "clean",    hint: "Drag the blue corners to align with your document" },
+  id:       { label: "ID Card",       defaultEnhance: "original", hint: "Drag the blue corners to align with your ID card" },
+  receipt:  { label: "Receipt",       defaultEnhance: "clean",    hint: "Drag the blue corners to align with your receipt" },
+  qr:       { label: "QR Code",       defaultEnhance: "original", hint: "Point camera at a QR code to scan instantly" },
 };
+
+// ─── Default corners ──────────────────────────────────────────────────────────
+function defaultCorners(w: number, h: number): Corners {
+  const mx = w * 0.07;
+  const my = h * 0.07;
+  return [{ x: mx, y: my }, { x: w - mx, y: my }, { x: w - mx, y: h - my }, { x: mx, y: h - my }];
+}
 
 function modeDefaultCorners(w: number, h: number, mode: ScannerMode): Corners {
   if (mode === "id") {
-    // ISO/IEC 7810 ID-1: 85.6 × 54 mm → ratio ≈ 1.586 landscape
-    const cw = Math.min(w * 0.78, h * 0.55 * 1.586);
+    const cw = Math.min(w * 0.80, h * 0.55 * 1.586);
     const ch = cw / 1.586;
     const x0 = (w - cw) / 2, y0 = (h - ch) / 2;
     return [{ x: x0, y: y0 }, { x: x0 + cw, y: y0 }, { x: x0 + cw, y: y0 + ch }, { x: x0, y: y0 + ch }];
   }
   if (mode === "receipt") {
-    // Tall narrow portrait ~1:2.8
     const rw = Math.min(w * 0.52, h * 0.3);
     const rh = Math.min(h * 0.84, rw * 2.8);
     const x0 = (w - rw) / 2, y0 = (h - rh) / 2;
@@ -39,176 +44,33 @@ function modeDefaultCorners(w: number, h: number, mode: ScannerMode): Corners {
   return defaultCorners(w, h);
 }
 
-// ─── OpenCV loader ─────────────────────────────────────────────────────────
-let cvPromise: Promise<boolean> | null = null;
-function loadOpenCV(): Promise<boolean> {
+// ─── OpenCV loader (optional — used for warp & enhance only) ─────────────────
+let cvPromise: Promise<void> | null = null;
+function loadOpenCV(): Promise<void> {
   if (cvPromise) return cvPromise;
-  cvPromise = new Promise((resolve) => {
+  cvPromise = new Promise<void>((resolve) => {
     const cv = (window as any).cv;
-    if (cv?.Mat) { resolve(true); return; }
+    if (cv?.Mat) { resolve(); return; }
     const script = document.createElement("script");
     script.src = "https://docs.opencv.org/4.8.0/opencv.js";
     script.async = true;
-    const timer = setTimeout(() => resolve(false), 25000);
+    const timer = setTimeout(resolve, 25000);
     script.onload = () => {
-      const ready = () => { clearTimeout(timer); resolve(true); };
       const w = window as any;
+      const ready = () => { clearTimeout(timer); resolve(); };
       if (w.cv?.Mat) { ready(); return; }
-      const prev = w.cv?.onRuntimeInitialized;
       if (w.cv) {
+        const prev = w.cv.onRuntimeInitialized;
         w.cv.onRuntimeInitialized = () => { prev?.(); ready(); };
       } else {
-        // cv might set itself later
-        let attempts = 0;
-        const poll = setInterval(() => {
-          if ((window as any).cv?.Mat || ++attempts > 100) {
-            clearInterval(poll);
-            resolve(!!(window as any).cv?.Mat);
-          }
-        }, 200);
+        let n = 0;
+        const p = setInterval(() => { if ((window as any).cv?.Mat || ++n > 100) { clearInterval(p); resolve(); } }, 200);
       }
     };
-    script.onerror = () => { clearTimeout(timer); resolve(false); };
+    script.onerror = () => { clearTimeout(timer); resolve(); };
     document.head.appendChild(script);
   });
   return cvPromise;
-}
-
-// ─── Geometry helpers ─────────────────────────────────────────────────────────
-function sortCorners(pts: Pt[]): Corners {
-  const cx = pts.reduce((s, p) => s + p.x, 0) / 4;
-  const cy = pts.reduce((s, p) => s + p.y, 0) / 4;
-  // Sort by angle from centroid (counter-clockwise from top-left)
-  const angled = pts.map(p => ({ ...p, a: Math.atan2(p.y - cy, p.x - cx) }));
-  angled.sort((a, b) => a.a - b.a);
-  // Rotate so top-left (smallest x+y sum) comes first
-  let minSum = Infinity, minIdx = 0;
-  for (let i = 0; i < 4; i++) {
-    const s = angled[i].x + angled[i].y;
-    if (s < minSum) { minSum = s; minIdx = i; }
-  }
-  const rotated = [...angled.slice(minIdx), ...angled.slice(0, minIdx)];
-  // Order: TL, BL, BR, TR (counter-clockwise) → remap to TL, TR, BR, BL
-  const [tl, bl, br, tr] = rotated;
-  return [tl, tr, br, bl];
-}
-
-function isConvex(pts: Pt[]): boolean {
-  const n = pts.length;
-  let sign = 0;
-  for (let i = 0; i < n; i++) {
-    const a = pts[i], b = pts[(i + 1) % n], c = pts[(i + 2) % n];
-    const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
-    if (cross !== 0) {
-      if (sign === 0) sign = cross > 0 ? 1 : -1;
-      else if ((cross > 0 ? 1 : -1) !== sign) return false;
-    }
-  }
-  return true;
-}
-
-function defaultCorners(w: number, h: number): Corners {
-  const m = Math.min(w, h) * 0.06;
-  return [{ x: m, y: m }, { x: w - m, y: m }, { x: w - m, y: h - m }, { x: m, y: h - m }];
-}
-
-// ─── Edge detection ───────────────────────────────────────────────────────────
-function detectCorners(canvas: HTMLCanvasElement): Corners | null {
-  const cv = (window as any).cv;
-  if (!cv?.Mat) return null;
-
-  const mats: any[] = [];
-  const track = <T,>(m: T): T => { mats.push(m); return m; };
-
-  try {
-    const src = track(cv.imread(canvas));
-    const gray = track(new cv.Mat());
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-
-    // Reduce noise with bilateral filter (preserves edges better than Gaussian)
-    let preEdge: any;
-    try {
-      const filtered = track(new cv.Mat());
-      cv.bilateralFilter(gray, filtered, 9, 75, 75, cv.BORDER_DEFAULT);
-      // CLAHE for better local contrast (optional — not all OpenCV.js builds have it)
-      const clahe = track(new cv.CLAHE(2.0, new cv.Size(8, 8)));
-      const enhanced = track(new cv.Mat());
-      clahe.apply(filtered, enhanced);
-      preEdge = enhanced;
-    } catch {
-      // Fallback: just Gaussian blur on grayscale
-      const fallback = track(new cv.Mat());
-      cv.GaussianBlur(gray, fallback, new cv.Size(7, 7), 0);
-      preEdge = fallback;
-    }
-
-    // Multi-pass edge detection: try multiple Canny thresholds (aggressive → conservative)
-    const thresholdSets = [[30, 100], [50, 150], [75, 200]];
-    const imgArea = canvas.width * canvas.height;
-    const minArea = imgArea * 0.04;
-    const maxArea = imgArea * 0.98;
-
-    let best: Corners | null = null;
-    let maxA = 0;
-
-    for (const [lo, hi] of thresholdSets) {
-      const blurred = track(new cv.Mat());
-      cv.GaussianBlur(preEdge, blurred, new cv.Size(5, 5), 0);
-
-      const edges = track(new cv.Mat());
-      cv.Canny(blurred, edges, lo, hi);
-
-      // Morphological close to connect broken edges
-      const kernel = track(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5)));
-      const closed = track(new cv.Mat());
-      cv.morphologyEx(edges, closed, cv.MORPH_CLOSE, kernel);
-
-      // Dilate to thicken edges
-      const k2 = track(cv.Mat.ones(3, 3, cv.CV_8U));
-      const dilated = track(new cv.Mat());
-      cv.dilate(closed, dilated, k2);
-
-      const contours = track(new cv.MatVector());
-      const hier = track(new cv.Mat());
-      cv.findContours(dilated, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-      for (let i = 0; i < contours.size(); i++) {
-        const cnt = contours.get(i);
-        const area = cv.contourArea(cnt);
-        if (area < minArea || area > maxArea || area <= maxA) { cnt.delete(); continue; }
-
-        const peri = cv.arcLength(cnt, true);
-        // Try multiple approximation tolerances
-        for (const tol of [0.015, 0.02, 0.03, 0.04]) {
-          const approx = new cv.Mat();
-          cv.approxPolyDP(cnt, approx, tol * peri, true);
-          if (approx.rows === 4) {
-            const d = approx.data32S;
-            const pts: Pt[] = [
-              { x: d[0], y: d[1] }, { x: d[2], y: d[3] },
-              { x: d[4], y: d[5] }, { x: d[6], y: d[7] },
-            ];
-            // Only accept convex quadrilaterals
-            if (isConvex(pts) && area > maxA) {
-              maxA = area;
-              best = sortCorners(pts);
-            }
-          }
-          approx.delete();
-          if (best && maxA === area) break;
-        }
-        cnt.delete();
-      }
-      // If we found a large enough contour, stop trying more thresholds
-      if (best && maxA > imgArea * 0.15) break;
-    }
-
-    return best;
-  } catch {
-    return null;
-  } finally {
-    for (const m of mats) { try { m.delete(); } catch {} }
-  }
 }
 
 // ─── Perspective warp ─────────────────────────────────────────────────────────
@@ -216,7 +78,7 @@ function warpWithCV(src: HTMLCanvasElement, c: Corners): HTMLCanvasElement | nul
   const cv = (window as any).cv;
   if (!cv?.Mat) return null;
   const mats: any[] = [];
-  const track = <T,>(m: T): T => { mats.push(m); return m; };
+  const t = <T,>(m: T): T => { mats.push(m); return m; };
   try {
     const topW = Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y);
     const botW = Math.hypot(c[2].x - c[3].x, c[2].y - c[3].y);
@@ -224,29 +86,14 @@ function warpWithCV(src: HTMLCanvasElement, c: Corners): HTMLCanvasElement | nul
     const rightH = Math.hypot(c[2].x - c[1].x, c[2].y - c[1].y);
     const outW = Math.round(Math.max(topW, botW));
     const outH = Math.round(Math.max(leftH, rightH));
+    if (outW < 4 || outH < 4) return null;
 
-    // Dynamic inward margin: proportional to shortest edge, clamped to image bounds
-    const minEdge = Math.min(topW, botW, leftH, rightH);
-    const margin = Math.min(3, minEdge * 0.02);
-    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
-    const W = src.width - 1, H = src.height - 1;
-    const inset: Corners = [
-      { x: clamp(c[0].x + margin, 0, W), y: clamp(c[0].y + margin, 0, H) },
-      { x: clamp(c[1].x - margin, 0, W), y: clamp(c[1].y + margin, 0, H) },
-      { x: clamp(c[2].x - margin, 0, W), y: clamp(c[2].y - margin, 0, H) },
-      { x: clamp(c[3].x + margin, 0, W), y: clamp(c[3].y - margin, 0, H) },
-    ];
-
-    const mat = track(cv.imread(src));
-    const dst = track(new cv.Mat());
-    const sp = track(cv.matFromArray(4, 1, cv.CV_32FC2, [
-      inset[0].x, inset[0].y, inset[1].x, inset[1].y,
-      inset[2].x, inset[2].y, inset[3].x, inset[3].y,
-    ]));
-    const dp = track(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, outW, 0, outW, outH, 0, outH]));
-    const M = track(cv.getPerspectiveTransform(sp, dp));
-    cv.warpPerspective(mat, dst, M, new cv.Size(outW, outH), cv.INTER_CUBIC, cv.BORDER_REPLICATE, new cv.Scalar());
-
+    const mat = t(cv.imread(src));
+    const dst = t(new cv.Mat());
+    const sp = t(cv.matFromArray(4, 1, cv.CV_32FC2, [c[0].x, c[0].y, c[1].x, c[1].y, c[2].x, c[2].y, c[3].x, c[3].y]));
+    const dp = t(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, outW, 0, outW, outH, 0, outH]));
+    const M = t(cv.getPerspectiveTransform(sp, dp));
+    cv.warpPerspective(mat, dst, M, new cv.Size(outW, outH), cv.INTER_CUBIC, cv.BORDER_REPLICATE);
     const out = document.createElement("canvas"); out.width = outW; out.height = outH;
     cv.imshow(out, dst);
     return out;
@@ -254,7 +101,7 @@ function warpWithCV(src: HTMLCanvasElement, c: Corners): HTMLCanvasElement | nul
   finally { for (const m of mats) { try { m.delete(); } catch {} } }
 }
 
-// Gaussian elimination for 8×8 system
+// Pure-JS perspective warp fallback (Gaussian elimination homography)
 function gauss(A: number[][], b: number[]): number[] {
   const n = 8;
   const M = A.map((r, i) => [...r, b[i]]);
@@ -291,7 +138,7 @@ function applyH(H: number[], x: number, y: number): [number, number] {
 }
 
 function warpPure(srcCanvas: HTMLCanvasElement, c: Corners): HTMLCanvasElement {
-  const MAX = 1400;
+  const MAX = 1600;
   let sc = srcCanvas;
   let corners = c;
   if (sc.width > MAX || sc.height > MAX) {
@@ -306,7 +153,8 @@ function warpPure(srcCanvas: HTMLCanvasElement, c: Corners): HTMLCanvasElement {
   const outH = Math.round(Math.max(Math.hypot(corners[3].x - corners[0].x, corners[3].y - corners[0].y), Math.hypot(corners[2].x - corners[1].x, corners[2].y - corners[1].y)));
   const srcData = sc.getContext("2d")!.getImageData(0, 0, sc.width, sc.height);
   const dstCanvas = document.createElement("canvas"); dstCanvas.width = outW; dstCanvas.height = outH;
-  const dstData = dstCanvas.getContext("2d")!.createImageData(outW, outH);
+  const dstCtx = dstCanvas.getContext("2d")!;
+  const dstData = dstCtx.createImageData(outW, outH);
   const dst = [{ x: 0, y: 0 }, { x: outW, y: 0 }, { x: outW, y: outH }, { x: 0, y: outH }];
   const H = computeH(dst as Pt[], corners as unknown as Pt[]);
   for (let dy = 0; dy < outH; dy++) {
@@ -319,7 +167,7 @@ function warpPure(srcCanvas: HTMLCanvasElement, c: Corners): HTMLCanvasElement {
       dstData.data[di + 2] = srcData.data[si + 2]; dstData.data[di + 3] = 255;
     }
   }
-  dstCanvas.getContext("2d")!.putImageData(dstData, 0, 0);
+  dstCtx.putImageData(dstData, 0, 0);
   return dstCanvas;
 }
 
@@ -327,7 +175,7 @@ function warpImage(src: HTMLCanvasElement, corners: Corners): HTMLCanvasElement 
   return warpWithCV(src, corners) ?? warpPure(src, corners);
 }
 
-// ─── Enhancement ─────────────────────────────────────────────────────────────
+// ─── Image enhancement ────────────────────────────────────────────────────────
 function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
   const cv = (window as any).cv;
   const out = document.createElement("canvas"); out.width = src.width; out.height = src.height;
@@ -336,111 +184,90 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
   const t = <T,>(m: T): T => { mats.push(m); return m; };
   const cleanup = () => { for (const m of mats) { try { m.delete(); } catch {} } };
 
-  // ── Original: light contrast boost, keep colors natural ──
+  // ── Original: just copy, no processing ───────────────────────────────────
   if (mode === "original") {
-    if (cv?.Mat) {
-      try {
-        const mat = t(cv.imread(src));
-        const rgb = t(new cv.Mat());
-        cv.cvtColor(mat, rgb, cv.COLOR_RGBA2RGB);
-        const labImg = t(new cv.Mat());
-        cv.cvtColor(rgb, labImg, cv.COLOR_RGB2Lab);
-        const channels = t(new cv.MatVector());
-        cv.split(labImg, channels);
-        const clahe = t(new cv.CLAHE(1.5, new cv.Size(8, 8)));
-        const enh = t(new cv.Mat());
-        clahe.apply(channels.get(0), enh);
-        channels.set(0, enh);
-        const merged = t(new cv.Mat());
-        cv.merge(channels, merged);
-        const rgb2 = t(new cv.Mat());
-        cv.cvtColor(merged, rgb2, cv.COLOR_Lab2RGB);
-        const rgba = t(new cv.Mat());
-        cv.cvtColor(rgb2, rgba, cv.COLOR_RGB2RGBA);
-        cv.imshow(out, rgba);
-        cleanup();
-        return out;
-      } catch { cleanup(); }
-    }
     ctx.drawImage(src, 0, 0);
-    const img = ctx.getImageData(0, 0, out.width, out.height);
-    const d = img.data;
-    for (let i = 0; i < d.length; i += 4) {
-      d[i]     = Math.min(255, Math.max(0, (d[i]     - 128) * 1.15 + 133));
-      d[i + 1] = Math.min(255, Math.max(0, (d[i + 1] - 128) * 1.15 + 133));
-      d[i + 2] = Math.min(255, Math.max(0, (d[i + 2] - 128) * 1.15 + 133));
-    }
-    ctx.putImageData(img, 0, 0);
     return out;
   }
 
-  // ── Clean: adaptive threshold — crisp text, no over-thresholding ──
+  // ── Clean: grayscale + gentle contrast lift (CLAHE if available) ─────────
   if (mode === "clean") {
     if (cv?.Mat) {
       try {
         const mat = t(cv.imread(src));
         const gray = t(new cv.Mat());
         cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
-        const denoised = t(new cv.Mat());
-        cv.GaussianBlur(gray, denoised, new cv.Size(3, 3), 0);
-        const clahe = t(new cv.CLAHE(2.0, new cv.Size(8, 8)));
-        const enh = t(new cv.Mat());
-        clahe.apply(denoised, enh);
-        const thr = t(new cv.Mat());
-        cv.adaptiveThreshold(enh, thr, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 15);
-        const k = t(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2, 2)));
-        const cleaned = t(new cv.Mat());
-        cv.morphologyEx(thr, cleaned, cv.MORPH_OPEN, k);
+
+        // Gentle blur to reduce camera noise
+        const blurred = t(new cv.Mat());
+        cv.GaussianBlur(gray, blurred, new cv.Size(3, 3), 0);
+
+        // Try CLAHE for local contrast normalization
+        let normalized: any = blurred;
+        try {
+          const clahe = t(new cv.CLAHE(2.0, new cv.Size(8, 8)));
+          const cl = t(new cv.Mat());
+          clahe.apply(blurred, cl);
+          normalized = cl;
+        } catch { /* CLAHE unavailable, use blurred as-is */ }
+
         const rgba = t(new cv.Mat());
-        cv.cvtColor(cleaned, rgba, cv.COLOR_GRAY2RGBA);
+        cv.cvtColor(normalized, rgba, cv.COLOR_GRAY2RGBA);
         cv.imshow(out, rgba);
         cleanup();
         return out;
       } catch { cleanup(); }
     }
+    // Pure-JS fallback: convert to grayscale with mild contrast
     ctx.drawImage(src, 0, 0);
     const img = ctx.getImageData(0, 0, out.width, out.height);
     const d = img.data;
     for (let i = 0; i < d.length; i += 4) {
-      let g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      g = Math.min(255, Math.max(0, (g - 128) * 1.4 + 140));
-      d[i] = d[i + 1] = d[i + 2] = g;
+      const g = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+      // Gentle s-curve: lift shadows, keep highlights
+      const v = Math.min(255, Math.max(0, Math.round((g - 128) * 1.2 + 138)));
+      d[i] = d[i + 1] = d[i + 2] = v;
     }
     ctx.putImageData(img, 0, 0);
     return out;
   }
 
-  // ── Strong B&W: aggressive threshold for max contrast scanned look ──
+  // ── B&W: soft adaptive threshold — readable text, clean white background ──
   if (cv?.Mat) {
     try {
       const mat = t(cv.imread(src));
       const gray = t(new cv.Mat());
       cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
-      const denoised = t(new cv.Mat());
-      cv.GaussianBlur(gray, denoised, new cv.Size(5, 5), 0);
-      const clahe = t(new cv.CLAHE(3.0, new cv.Size(8, 8)));
-      const enh = t(new cv.Mat());
-      clahe.apply(denoised, enh);
+
+      const blurred = t(new cv.Mat());
+      cv.GaussianBlur(gray, blurred, new cv.Size(3, 3), 0);
+
+      // LARGE block size + HIGH C = softer threshold (not harsh)
+      // Block 51 = examines large neighbourhood → handles gradual lighting changes
+      // C = 18 = subtracts enough to keep text black but keeps thin strokes
       const thr = t(new cv.Mat());
-      cv.adaptiveThreshold(enh, thr, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 21, 10);
-      const k = t(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(2, 2)));
-      const step1 = t(new cv.Mat());
-      cv.morphologyEx(thr, step1, cv.MORPH_CLOSE, k);
-      const step2 = t(new cv.Mat());
-      cv.morphologyEx(step1, step2, cv.MORPH_OPEN, k);
+      cv.adaptiveThreshold(blurred, thr, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 51, 18);
+
+      // Tiny morphological open to remove isolated noise pixels
+      const k = t(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2, 2)));
+      const cleaned = t(new cv.Mat());
+      cv.morphologyEx(thr, cleaned, cv.MORPH_OPEN, k);
+
       const rgba = t(new cv.Mat());
-      cv.cvtColor(step2, rgba, cv.COLOR_GRAY2RGBA);
+      cv.cvtColor(cleaned, rgba, cv.COLOR_GRAY2RGBA);
       cv.imshow(out, rgba);
       cleanup();
       return out;
     } catch { cleanup(); }
   }
+  // Pure-JS fallback: gentle global threshold
   ctx.drawImage(src, 0, 0);
   const img = ctx.getImageData(0, 0, out.width, out.height);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4) {
-    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    const v = g > 120 ? 255 : 0;
+    const g = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+    // Soft threshold: 140 cutoff (not 128), so light grays stay white
+    const v = g > 140 ? 255 : Math.max(0, g - 30);
     d[i] = d[i + 1] = d[i + 2] = v;
   }
   ctx.putImageData(img, 0, 0);
@@ -449,7 +276,6 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function Scanner() {
-  // Read scanner mode from URL (component remounts on each navigation)
   const scannerMode = useMemo((): ScannerMode => {
     const m = new URLSearchParams(window.location.search).get("mode") ?? "document";
     return (["document", "id", "receipt", "qr"] as const).includes(m as ScannerMode)
@@ -457,8 +283,7 @@ export default function Scanner() {
   }, []);
   const meta = MODE_META[scannerMode];
 
-  const [phase, setPhase] = useState<Phase>("loading");
-  const [cvReady, setCvReady] = useState(false);
+  const [phase, setPhase] = useState<Phase>("idle");
   const [captured, setCaptured] = useState<HTMLCanvasElement | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [corners, setCorners] = useState<Corners | null>(null);
@@ -472,18 +297,14 @@ export default function Scanner() {
   const [copied, setCopied] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
-  const overlayRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const detectTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const qrTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => {
-    loadOpenCV().then(ok => { setCvReady(ok); setPhase("idle"); });
-  }, []);
+  // Load OpenCV silently in the background (for warp + enhance only)
+  useEffect(() => { loadOpenCV(); }, []);
 
   const stopCam = useCallback(() => {
-    if (detectTimer.current) { clearInterval(detectTimer.current); detectTimer.current = null; }
     if (qrTimer.current) { clearInterval(qrTimer.current); qrTimer.current = null; }
     streamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null;
@@ -491,134 +312,65 @@ export default function Scanner() {
 
   useEffect(() => () => stopCam(), [stopCam]);
 
-  // Attach stream to <video> element AFTER phase="scanning" has rendered the element
+  // Attach stream to <video> after phase="scanning" mounts the element
   useEffect(() => {
     if (phase !== "scanning") return;
     const video = videoRef.current;
     const stream = streamRef.current;
     if (!video || !stream) return;
-
-    // Set attributes imperatively (belt-and-suspenders on top of JSX attrs)
     video.muted = true;
     video.setAttribute("playsinline", "");
     video.setAttribute("autoplay", "");
     video.srcObject = stream;
-
     const onMeta = () => {
-      console.log("[Scanner] loadedmetadata", video.videoWidth, "x", video.videoHeight);
       video.play()
-        .then(() => {
-          console.log("[Scanner] video playing", video.videoWidth, "x", video.videoHeight);
-          setCamReady(true);
-        })
+        .then(() => setCamReady(true))
         .catch(e => console.error("[Scanner] play() failed:", e));
     };
-
-    // If metadata already loaded (e.g. stream reused), fire immediately
     if (video.readyState >= 1) { onMeta(); }
     else { video.addEventListener("loadedmetadata", onMeta, { once: true }); }
-
     return () => video.removeEventListener("loadedmetadata", onMeta);
   }, [phase]);
 
-  // Edge-detection (document) OR QR scanning — starts once camera is ready
+  // QR scanning loop
   useEffect(() => {
-    if (!camReady) return;
-
-    if (scannerMode === "qr") {
-      // QR scanning loop using jsQR
-      import("jsqr").then(({ default: jsQR }) => {
-        qrTimer.current = setInterval(() => {
-          const v = videoRef.current;
-          if (!v || !v.videoWidth) return;
-          const tmp = document.createElement("canvas");
-          tmp.width = v.videoWidth; tmp.height = v.videoHeight;
-          tmp.getContext("2d")!.drawImage(v, 0, 0);
-          const imgData = tmp.getContext("2d")!.getImageData(0, 0, tmp.width, tmp.height);
-          const code = jsQR(imgData.data, tmp.width, tmp.height, { inversionAttempts: "dontInvert" });
-          if (code?.data) {
-            setQrResult(code.data);
-            stopCam();
-            setPhase("result");
-          }
-        }, 150);
-      });
-      return () => {
-        if (qrTimer.current) { clearInterval(qrTimer.current); qrTimer.current = null; }
-      };
-    }
-
-    // Document/ID/Receipt — edge detection with OpenCV (if ready)
-    if (!cvReady) return;
-    detectTimer.current = setInterval(() => {
-      const v = videoRef.current;
-      const ov = overlayRef.current;
-      if (!v || !ov || !v.videoWidth) return;
-      const tmp = document.createElement("canvas");
-      tmp.width = v.videoWidth; tmp.height = v.videoHeight;
-      tmp.getContext("2d")!.drawImage(v, 0, 0);
-      const pts = detectCorners(tmp);
-      const ctx = ov.getContext("2d")!;
-      ov.width = tmp.width; ov.height = tmp.height;
-      ctx.clearRect(0, 0, ov.width, ov.height);
-      if (pts) {
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        pts.forEach(p => ctx.lineTo(p.x, p.y));
-        ctx.closePath();
-        ctx.fillStyle = "rgba(34,197,94,.18)";
-        ctx.fill();
-        ctx.strokeStyle = "#22c55e";
-        ctx.lineWidth = Math.max(2, ov.width * 0.003);
-        ctx.stroke();
-        pts.forEach(p => {
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, Math.max(6, ov.width * 0.012), 0, Math.PI * 2);
-          ctx.fillStyle = "#22c55e";
-          ctx.fill();
-        });
-      }
-    }, 250);
-    return () => {
-      if (detectTimer.current) { clearInterval(detectTimer.current); detectTimer.current = null; }
-    };
-  }, [camReady, cvReady, scannerMode, stopCam]);
+    if (!camReady || scannerMode !== "qr") return;
+    import("jsqr").then(({ default: jsQR }) => {
+      qrTimer.current = setInterval(() => {
+        const v = videoRef.current;
+        if (!v || !v.videoWidth) return;
+        const tmp = document.createElement("canvas");
+        tmp.width = v.videoWidth; tmp.height = v.videoHeight;
+        tmp.getContext("2d")!.drawImage(v, 0, 0);
+        const imgData = tmp.getContext("2d")!.getImageData(0, 0, tmp.width, tmp.height);
+        const code = jsQR(imgData.data, tmp.width, tmp.height, { inversionAttempts: "dontInvert" });
+        if (code?.data) { setQrResult(code.data); stopCam(); setPhase("result"); }
+      }, 150);
+    });
+    return () => { if (qrTimer.current) { clearInterval(qrTimer.current); qrTimer.current = null; } };
+  }, [camReady, scannerMode, stopCam]);
 
   const startCam = useCallback(async (f: "environment" | "user" = "environment") => {
-    setErr(null);
-    setCamReady(false);
-    stopCam();
-
-    // Fallback constraint chain — start strict, relax if needed
+    setErr(null); setCamReady(false); stopCam();
     const profiles = [
       { video: { facingMode: f } },
       { video: { facingMode: { ideal: f } } },
       { video: true },
     ] as const;
-
     let stream: MediaStream | null = null;
     for (const constraints of profiles) {
       try {
-        console.log("[Scanner] trying constraints:", JSON.stringify(constraints));
         stream = await navigator.mediaDevices.getUserMedia({ ...constraints, audio: false });
-        console.log("[Scanner] stream obtained:", stream.getVideoTracks()[0]?.label);
         break;
       } catch (e: any) {
-        console.error("[Scanner] getUserMedia failed:", e.name, e.message, constraints);
         if (e.name === "NotAllowedError") {
           setErr("Camera permission denied. Please allow camera access in your browser settings.");
           return;
         }
       }
     }
-
-    if (!stream) {
-      setErr("Could not start camera. Make sure your device has a camera and try again.");
-      return;
-    }
-
+    if (!stream) { setErr("Could not start camera. Make sure your device has a camera and try again."); return; }
     streamRef.current = stream;
-    // Switch phase so the <video> element mounts; useEffect above will attach the stream
     setPhase("scanning");
   }, [stopCam]);
 
@@ -629,8 +381,8 @@ export default function Scanner() {
     c.width = v.videoWidth; c.height = v.videoHeight;
     c.getContext("2d")!.drawImage(v, 0, 0);
     stopCam();
-    const detected = scannerMode !== "qr" ? detectCorners(c) : null;
-    setCorners(detected ?? modeDefaultCorners(c.width, c.height, scannerMode));
+    // Always use mode-appropriate default corners — user will adjust manually
+    setCorners(modeDefaultCorners(c.width, c.height, scannerMode));
     setCaptured(c);
     setPhase("captured");
   }, [stopCam, scannerMode]);
@@ -657,7 +409,7 @@ export default function Scanner() {
     try {
       const warped = warpImage(captured, corners);
       setResultUrl(enhance(warped, m).toDataURL("image/jpeg", 0.95));
-    } catch { /* keep previous result */ }
+    } catch { /* keep previous */ }
     setBusy(false);
   }, [captured, corners]);
 
@@ -688,8 +440,8 @@ export default function Scanner() {
 
   const reset = useCallback(() => {
     stopCam(); setCaptured(null); setResultUrl(null); setCorners(null);
-    setQrResult(null); setCopied(false);
-    setErr(null); setMode(meta.defaultEnhance); setCamReady(false); setPhase("idle");
+    setQrResult(null); setCopied(false); setErr(null);
+    setMode(meta.defaultEnhance); setCamReady(false); setPhase("idle");
   }, [stopCam, meta.defaultEnhance]);
 
   const copyToClipboard = useCallback((text: string) => {
@@ -713,21 +465,21 @@ export default function Scanner() {
     if (dragging === null || !corners || !wrapRef.current || !captured) return;
     const r = wrapRef.current.getBoundingClientRect();
     const pt: Pt = {
-      x: ((e.clientX - r.left) / r.width) * captured.width,
-      y: ((e.clientY - r.top) / r.height) * captured.height,
+      x: Math.max(0, Math.min(captured.width,  ((e.clientX - r.left) / r.width)  * captured.width)),
+      y: Math.max(0, Math.min(captured.height, ((e.clientY - r.top)  / r.height) * captured.height)),
     };
     const nc = [...corners] as Corners; nc[dragging] = pt; setCorners(nc);
   };
   const onPtrUp = () => setDragging(null);
 
-  const ModeBar = ({ onChange }: { onChange: (m: EnhanceMode) => void }) => (
-    <div className="flex gap-2 justify-center">
-      {(["original", "clean", "strong_bw"] as const).map(m => (
+  const EnhanceModeBar = ({ onChange }: { onChange: (m: EnhanceMode) => void }) => (
+    <div className="flex gap-2 justify-center flex-wrap">
+      {(["original", "clean", "bw"] as const).map(m => (
         <button key={m} onClick={() => onChange(m)}
           className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
             mode === m ? "bg-indigo-600 text-white shadow" : "bg-muted text-muted-foreground hover:bg-accent"
           }`}>
-          {{ original: "Original", clean: "Clean", strong_bw: "Strong B&W" }[m]}
+          {{ original: "Original", clean: "Clean", bw: "B&W" }[m]}
         </button>
       ))}
     </div>
@@ -736,32 +488,28 @@ export default function Scanner() {
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-[100dvh] bg-background">
+
       {/* Sub-header */}
       <div className="sticky top-14 z-40 flex items-center gap-3 px-4 py-2.5 border-b border-border bg-white/90 backdrop-blur">
-        <Link href="/"><button className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"><ArrowLeft className="w-4 h-4" />Back</button></Link>
+        <Link href="/">
+          <button className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors">
+            <ArrowLeft className="w-4 h-4" />Back
+          </button>
+        </Link>
         <div className="h-4 w-px bg-border" />
         {scannerMode === "qr"
           ? <QrCode className="w-4 h-4 text-amber-500" />
           : <ScanLine className="w-4 h-4 text-amber-500" />}
         <span className="font-semibold text-sm">{meta.label}</span>
-        {!cvReady && phase !== "loading" && scannerMode !== "qr" && (
-          <span className="ml-auto text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">Basic mode</span>
-        )}
       </div>
 
       {err && (
-        <div className="mx-4 mt-3 p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-sm text-destructive">{err}</div>
-      )}
-
-      {/* LOADING */}
-      {phase === "loading" && (
-        <div className="flex flex-col items-center justify-center min-h-[70vh] gap-4">
-          <Loader2 className="w-10 h-10 text-amber-500 animate-spin" />
-          <p className="text-sm text-muted-foreground">Loading scanner engine…</p>
+        <div className="mx-4 mt-3 p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-sm text-destructive">
+          {err}
         </div>
       )}
 
-      {/* IDLE */}
+      {/* ── IDLE ── */}
       {phase === "idle" && (
         <div className="flex flex-col items-center justify-center min-h-[72vh] px-6 text-center gap-6">
           <div className="w-20 h-20 rounded-2xl bg-amber-50 border border-amber-100 flex items-center justify-center">
@@ -775,10 +523,10 @@ export default function Scanner() {
               {scannerMode === "qr"
                 ? "Point your camera at any QR code to instantly decode it."
                 : scannerMode === "id"
-                ? "Place your ID card on a flat surface and capture it."
+                ? "Place your ID card on a flat surface, capture it, then drag the corners to align."
                 : scannerMode === "receipt"
-                ? "Hold the receipt upright and capture for a clean scan."
-                : cvReady ? "Point at a document — edges are detected automatically." : "Capture the document and adjust corners manually."}
+                ? "Hold the receipt upright, capture it, then drag the corners to align."
+                : "Capture your document then drag the 4 blue corners to align the boundary."}
             </p>
           </div>
           {/* Mode selector pills */}
@@ -800,68 +548,61 @@ export default function Scanner() {
         </div>
       )}
 
-      {/* SCANNING */}
+      {/* ── SCANNING ── */}
       {phase === "scanning" && (
         <div className="flex flex-col" style={{ height: "calc(100dvh - 7rem)" }}>
           <div className="relative flex-1 bg-black overflow-hidden">
-            {/* Video: object-cover fills the viewport, no black bars */}
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-full object-cover"
-            />
-            {/* Canvas overlay for edge-detection highlight */}
-            <canvas
-              ref={overlayRef}
-              className="absolute inset-0 w-full h-full pointer-events-none"
-            />
-            {/* Loading spinner while camera initialises */}
+            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+
+            {/* Spinner while camera initialises */}
             {!camReady && (
               <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 z-10 gap-3">
                 <Loader2 className="w-8 h-8 text-white animate-spin" />
                 <p className="text-white text-sm">Starting camera…</p>
               </div>
             )}
-            {/* ID card guide rectangle */}
+
+            {/* ID card guide */}
             {camReady && scannerMode === "id" && (
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-                <div className="border-2 border-yellow-400 rounded-lg shadow-lg"
+                <div className="border-2 border-yellow-400 rounded-lg"
                   style={{ width: "75%", aspectRatio: "85.6/54", boxShadow: "0 0 0 1000px rgba(0,0,0,0.45)" }} />
               </div>
             )}
-            {/* Receipt guide rectangle */}
+
+            {/* Receipt guide */}
             {camReady && scannerMode === "receipt" && (
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
                 <div className="border-2 border-yellow-400 rounded-lg"
                   style={{ width: "45%", aspectRatio: "1/2.8", boxShadow: "0 0 0 1000px rgba(0,0,0,0.45)" }} />
               </div>
             )}
-            {/* QR scanning crosshair */}
+
+            {/* QR crosshair */}
             {camReady && scannerMode === "qr" && (
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
                 <div className="relative w-52 h-52">
-                  {/* Corner brackets */}
-                  {[["top-0 left-0 border-t-2 border-l-2",""],["top-0 right-0 border-t-2 border-r-2",""],
-                    ["bottom-0 left-0 border-b-2 border-l-2",""],["bottom-0 right-0 border-b-2 border-r-2",""]].map(([cls],i) => (
+                  {[["top-0 left-0 border-t-2 border-l-2"], ["top-0 right-0 border-t-2 border-r-2"],
+                    ["bottom-0 left-0 border-b-2 border-l-2"], ["bottom-0 right-0 border-b-2 border-r-2"]].map(([cls], i) => (
                     <div key={i} className={`absolute w-8 h-8 border-amber-400 ${cls} rounded-sm`} />
                   ))}
-                  {/* Scan line animation */}
-                  <div className="absolute inset-x-0 h-0.5 bg-amber-400/80 animate-[scanLine_2s_ease-in-out_infinite]"
+                  <div className="absolute inset-x-0 h-0.5 bg-amber-400/80"
                     style={{ animation: "scanLine 2s ease-in-out infinite" }} />
                 </div>
               </div>
             )}
+
             {/* Hint banner */}
             {camReady && (
               <div className="absolute bottom-3 inset-x-0 flex justify-center pointer-events-none z-10">
                 <span className="bg-black/60 text-white text-xs px-3 py-1.5 rounded-full backdrop-blur">
-                  {meta.hint}
+                  {scannerMode === "qr" ? "Align QR code in the frame" : "Position document in frame, then tap capture"}
                 </span>
               </div>
             )}
           </div>
+
+          {/* Bottom controls */}
           <div className="flex items-center justify-between px-8 py-4 bg-zinc-900">
             <button onClick={reset} className="p-3 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors">
               <CameraOff className="w-5 h-5" />
@@ -879,55 +620,112 @@ export default function Scanner() {
         </div>
       )}
 
-      {/* CAPTURED — corner adjust */}
+      {/* ── CAPTURED — corner adjustment ── */}
       {phase === "captured" && captured && corners && (
         <div className="flex flex-col">
-          <div className="bg-indigo-50 border-b border-indigo-100 text-center px-4 py-2.5">
-            <p className="text-sm text-indigo-700 font-medium">Drag the blue handles to align the document boundary</p>
+          {/* Instruction banner */}
+          <div className="bg-indigo-50 border-b border-indigo-100 px-4 py-2.5 text-center">
+            <p className="text-sm text-indigo-700 font-medium">
+              Drag the <span className="font-bold">blue circles</span> to align the 4 corners of your document
+            </p>
           </div>
 
-          {/* Image + corner handles */}
-          <div ref={wrapRef} className="relative bg-black select-none" style={{ touchAction: "none" }}
-            onPointerMove={onPtrMove} onPointerUp={onPtrUp} onPointerLeave={onPtrUp}>
-            <img src={captured.toDataURL()} alt="captured" className="w-full h-auto block" draggable={false} />
-            <svg className="absolute inset-0 w-full h-full pointer-events-none"
-              viewBox={`0 0 ${captured.width} ${captured.height}`} preserveAspectRatio="none">
-              <polygon points={corners.map(c => `${c.x},${c.y}`).join(" ")}
-                fill="rgba(99,102,241,.18)" stroke="#6366f1" strokeWidth={captured.width * 0.004} />
+          {/* Image + draggable corner handles */}
+          <div
+            ref={wrapRef}
+            className="relative bg-black select-none"
+            style={{ touchAction: "none" }}
+            onPointerMove={onPtrMove}
+            onPointerUp={onPtrUp}
+            onPointerLeave={onPtrUp}
+          >
+            <img
+              src={captured.toDataURL()}
+              alt="captured"
+              className="w-full h-auto block"
+              draggable={false}
+            />
+
+            {/* Quad overlay */}
+            <svg
+              className="absolute inset-0 w-full h-full pointer-events-none"
+              viewBox={`0 0 ${captured.width} ${captured.height}`}
+              preserveAspectRatio="none"
+            >
+              {/* Semi-transparent overlay outside the quad */}
+              <defs>
+                <mask id="quad-mask">
+                  <rect width={captured.width} height={captured.height} fill="white" />
+                  <polygon points={corners.map(c => `${c.x},${c.y}`).join(" ")} fill="black" />
+                </mask>
+              </defs>
+              <rect
+                width={captured.width} height={captured.height}
+                fill="rgba(0,0,0,0.45)" mask="url(#quad-mask)"
+              />
+              {/* Crop boundary */}
+              <polygon
+                points={corners.map(c => `${c.x},${c.y}`).join(" ")}
+                fill="rgba(99,102,241,0.12)"
+                stroke="#6366f1"
+                strokeWidth={Math.max(2, captured.width * 0.003)}
+                strokeDasharray={`${captured.width * 0.015} ${captured.width * 0.008}`}
+              />
+              {/* Edge lines with corner index labels */}
+              {corners.map((c, i) => {
+                const next = corners[(i + 1) % 4];
+                return <line key={i} x1={c.x} y1={c.y} x2={next.x} y2={next.y} stroke="#6366f1" strokeWidth={Math.max(1.5, captured.width * 0.002)} />;
+              })}
             </svg>
+
+            {/* Corner handle dots */}
             {corners.map((c, i) => (
-              <div key={i}
-                className="absolute w-7 h-7 rounded-full bg-indigo-600 border-3 border-white shadow-lg cursor-grab active:cursor-grabbing touch-none -translate-x-1/2 -translate-y-1/2 z-10"
-                style={{ left: `${(c.x / captured.width) * 100}%`, top: `${(c.y / captured.height) * 100}%`, borderWidth: 3 }}
-                onPointerDown={e => onPtrDown(e, i)} />
+              <div
+                key={i}
+                className="absolute z-10 touch-none cursor-grab active:cursor-grabbing"
+                style={{
+                  left: `${(c.x / captured.width) * 100}%`,
+                  top: `${(c.y / captured.height) * 100}%`,
+                  transform: "translate(-50%, -50%)",
+                }}
+                onPointerDown={e => onPtrDown(e, i)}
+              >
+                {/* Outer ring for larger touch target */}
+                <div className="w-10 h-10 rounded-full flex items-center justify-center bg-white/20">
+                  <div className="w-6 h-6 rounded-full bg-indigo-600 border-2 border-white shadow-lg" />
+                </div>
+              </div>
             ))}
           </div>
 
-          <div className="px-4 py-4 border-t border-border space-y-3">
+          {/* Controls below the image */}
+          <div className="px-4 py-4 border-t border-border space-y-3 bg-background">
             <div>
               <p className="text-xs text-center text-muted-foreground mb-2">Output mode</p>
-              <ModeBar onChange={m => setMode(m)} />
+              <EnhanceModeBar onChange={m => setMode(m)} />
             </div>
             <div className="flex gap-3">
-              <Button variant="outline" onClick={reset} className="flex-1 gap-2"><RefreshCcw className="w-4 h-4" />Retake</Button>
+              <Button variant="outline" onClick={reset} className="flex-1 gap-2">
+                <RefreshCcw className="w-4 h-4" />Retake
+              </Button>
               <Button onClick={() => process()} disabled={busy} className="flex-1 gap-2">
                 {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-                {busy ? "Processing…" : "Apply & Scan"}
+                {busy ? "Processing…" : "Apply & Crop"}
               </Button>
             </div>
           </div>
         </div>
       )}
 
-      {/* RESULT — QR mode */}
+      {/* ── RESULT — QR mode ── */}
       {phase === "result" && scannerMode === "qr" && qrResult && (
         <div className="flex flex-col items-center px-4 py-8 gap-6 max-w-lg mx-auto w-full">
           <div className="w-16 h-16 rounded-2xl bg-green-50 border border-green-100 flex items-center justify-center">
             <QrCode className="w-8 h-8 text-green-600" />
           </div>
-          <div className="text-center">
-            <p className="text-xs text-muted-foreground mb-1 uppercase tracking-wide font-medium">QR Code Decoded</p>
-            <div className="w-full max-w-sm rounded-xl border border-border bg-muted/50 px-4 py-3 text-sm break-all text-foreground font-mono">
+          <div className="text-center w-full">
+            <p className="text-xs text-muted-foreground mb-2 uppercase tracking-wide font-medium">QR Code Decoded</p>
+            <div className="w-full rounded-xl border border-border bg-muted/50 px-4 py-3 text-sm break-all text-foreground font-mono">
               {qrResult}
             </div>
           </div>
@@ -948,18 +746,20 @@ export default function Scanner() {
         </div>
       )}
 
-      {/* RESULT — Document / ID / Receipt mode */}
+      {/* ── RESULT — Document / ID / Receipt ── */}
       {phase === "result" && scannerMode !== "qr" && (
         <div className="flex flex-col items-center px-4 py-6 gap-5 max-w-lg mx-auto w-full">
           <div className="w-full rounded-xl overflow-hidden border border-border shadow-md bg-white">
             {busy
-              ? <div className="aspect-[3/4] flex items-center justify-center bg-muted"><Loader2 className="w-8 h-8 text-indigo-500 animate-spin" /></div>
+              ? <div className="aspect-[3/4] flex items-center justify-center bg-muted">
+                  <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
+                </div>
               : resultUrl && <img src={resultUrl} alt="Scanned document" className="w-full h-auto" />}
           </div>
 
           <div className="space-y-1.5 text-center w-full">
             <p className="text-xs text-muted-foreground">Enhancement mode</p>
-            <ModeBar onChange={m => { setMode(m); reprocess(m); }} />
+            <EnhanceModeBar onChange={m => { setMode(m); reprocess(m); }} />
           </div>
 
           <div className="flex gap-3 w-full">
