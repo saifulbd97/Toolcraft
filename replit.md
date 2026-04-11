@@ -2,39 +2,34 @@
 
 ## Overview
 
-pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
+Single-package Node.js/TypeScript project with React+Vite frontend and Express backend. No database or authentication required.
 
 ## Stack
 
-- **Monorepo tool**: pnpm workspaces
+- **Package manager**: npm (single root package.json, no workspaces)
 - **Node.js version**: 24
-- **Package manager**: pnpm
 - **TypeScript version**: 5.9
 - **API framework**: Express 5
-- **Database**: PostgreSQL + Drizzle ORM
-- **Validation**: Zod (`zod/v4`), `drizzle-zod`
-- **API codegen**: Orval (from OpenAPI spec)
-- **Build**: esbuild (CJS bundle)
+- **Validation**: Zod
+- **Build**: `node build.mjs` — runs Vite (frontend) then esbuild (backend)
 
 ## Artifacts
 
-### Multi-Tools Web App (`artifacts/pdf-merger`)
-- React + Vite single-page app at preview path `/`
+### Frontend (`artifacts/pdf-merger`)
+- React + Vite SPA at preview path `/`
 - Full bilingual support (English + Bengali) via i18n context
 - **Route structure:**
-  - `/` — Home page with 3 category cards (PDF Tools, Scanner, Income Calculator)
-  - `/pdf` — PDF tools dashboard (grid of all 5 tools, with "Back to Home" link)
+  - `/` — Landing page
+  - `/pdf` — PDF tools dashboard (grid of all 5 tools)
   - `/pdf/merge` — Merge PDF: combine multiple PDFs and images into one document
   - `/pdf/jpg-to-pdf` — JPG to PDF: convert JPG/PNG images into a single PDF
   - `/pdf/pdf-to-jpg` — PDF to JPG: convert every PDF page into high-quality JPG images (ZIP)
   - `/pdf/split` — Split PDF: split into individual pages (ZIP) or extract a page range
   - `/pdf/compress` — Compress PDF: compress PDFs using Ghostscript (low/medium/high)
-  - `/scanner` — Coming Soon (Scanner category)
-  - `/income-calculator` — Coming Soon (Income Calculator category)
-- Each PDF tool page has a "Back to PDF tools" button that returns to `/pdf`
 
 ### API Server (`artifacts/api-server`)
-- Express 5 backend at `/api` (port 8080)
+- Express 5 backend at `/api` (port from `process.env.PORT`, default 3000)
+- **No auth, no sessions, no database**
 - Routes:
   - `GET  /api/healthz` — health check
   - `POST /api/pdf/merge` — multipart `files[]` (PDF/JPG/PNG), returns merged PDF
@@ -46,24 +41,30 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - Uses `pdf-lib` for PDF operations, `multer` for file uploads, `JSZip` for archives
 - System tools required: `gs` (Ghostscript) for compress, `pdftoppm` (Poppler) for PDF-to-JPG
 
+## Key Commands
+
+```
+npm run build   # builds frontend (vite) + backend (esbuild) → artifacts/*/dist/
+npm start       # node artifacts/api-server/dist/index.mjs
+```
+
 ## Important Bug Fix (Applied)
 
-**JPG/PNG embedding in pdf-lib**: Node.js `Buffer` objects from multer use a shared memory pool and may have a non-zero `byteOffset` within their underlying `ArrayBuffer`. The `pdf-lib` JPEG/PNG embedders read from `imageData.buffer` using `DataView`, which starts at offset 0 of the raw `ArrayBuffer` — ignoring `byteOffset`. This caused `"SOI not found in JPEG"` / `"Invalid PNG"` errors.
+**JPG/PNG embedding in pdf-lib**: Multer buffers use a shared memory pool with non-zero `byteOffset`. `pdf-lib`'s embedders read from `buffer.buffer` (the raw ArrayBuffer) starting at offset 0, ignoring `byteOffset`, causing `"SOI not found in JPEG"` / `"Invalid PNG"` errors.
 
-**Fix**: In `imageToPdfPage()`, create a zero-offset copy: `new Uint8Array(file.buffer)` before passing to `embedJpg`/`embedPng`.
+**Fix**: Always use `new Uint8Array(file.buffer)` before passing to `embedJpg`/`embedPng`.
 
 ## Frontend → Backend Connectivity
 
 In development (Vite dev server), API calls to `/api/*` are proxied to `http://localhost:8080` via Vite's `server.proxy` config in `artifacts/pdf-merger/vite.config.ts`.
 
-In production, the path router sends `/api/*` requests directly to the API server.
+In production, the Express server serves the built React frontend and handles SPA routing for all non-API paths.
 
-## Key Commands
+## Render Deployment
 
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- `pnpm --filter @workspace/api-server run dev` — run API server locally
-
-See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+`render.yaml` deploys a single web service:
+- Build: `npm install && npm run build`
+- Start: `npm start`
+- Health check: `/api/healthz`
+- Env vars needed: `NODE_ENV=production`, `PORT=10000`
+- **No database required**
