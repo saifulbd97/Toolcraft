@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { motion } from "framer-motion";
-import { FileText, ScanLine, Calculator, ArrowRight, Sparkles } from "lucide-react";
+import { FileText, ScanLine, Calculator, Wand2, ArrowRight, Sparkles } from "lucide-react";
 import { useTranslation } from "@/lib/i18n";
 
 const containerVariants = {
@@ -61,6 +61,18 @@ const categories: CategoryCard[] = [
     borderHover: "hover:border-emerald-200",
     shadowHover: "hover:shadow-emerald-100",
     barColor: "bg-emerald-500",
+    available: true,
+  },
+  {
+    key: "bgRemover",
+    icon: Wand2,
+    href: "/bg-remover",
+    color: "bg-violet-500",
+    lightColor: "bg-violet-50",
+    textColor: "text-violet-600",
+    borderHover: "hover:border-violet-200",
+    shadowHover: "hover:shadow-violet-100",
+    barColor: "bg-violet-500",
     available: true,
   },
 ];
