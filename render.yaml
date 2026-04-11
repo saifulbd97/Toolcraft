@@ -9,8 +9,8 @@ services:
     name: tolyx-app
     runtime: node
     plan: free
-    buildCommand: node build.mjs
-    startCommand: node artifacts/api-server/dist/index.mjs
+    buildCommand: npm install && npm run build
+    startCommand: npm start
     healthCheckPath: /api/healthz
     envVars:
       - key: NODE_ENV
