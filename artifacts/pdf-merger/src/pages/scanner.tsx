@@ -28,12 +28,20 @@ function defaultCorners(w: number, h: number): Corners {
   return [{ x: mx, y: my }, { x: w - mx, y: my }, { x: w - mx, y: h - my }, { x: mx, y: h - my }];
 }
 
+// ID card ISO 7810 ratio: 85.60 × 53.98 mm ≈ 1.586
+const ID_RATIO = 85.60 / 53.98;
+
+function idCornersFromBox(x0: number, y0: number, x1: number, y1: number): Corners {
+  return [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }];
+}
+
 function modeDefaultCorners(w: number, h: number, mode: ScannerMode): Corners {
   if (mode === "id") {
-    const cw = Math.min(w * 0.80, h * 0.55 * 1.586);
-    const ch = cw / 1.586;
+    // Zoom in to 75% of frame width — centres on likely card area, trims background
+    const cw = Math.min(w * 0.75, h * 0.60 * ID_RATIO);
+    const ch = cw / ID_RATIO;
     const x0 = (w - cw) / 2, y0 = (h - ch) / 2;
-    return [{ x: x0, y: y0 }, { x: x0 + cw, y: y0 }, { x: x0 + cw, y: y0 + ch }, { x: x0, y: y0 + ch }];
+    return idCornersFromBox(x0, y0, x0 + cw, y0 + ch);
   }
   if (mode === "receipt") {
     const rw = Math.min(w * 0.52, h * 0.3);
@@ -464,11 +472,45 @@ export default function Scanner() {
   const onPtrMove = (e: React.PointerEvent) => {
     if (dragging === null || !corners || !wrapRef.current || !captured) return;
     const r = wrapRef.current.getBoundingClientRect();
+    const rawX = ((e.clientX - r.left) / r.width)  * captured.width;
+    const rawY = ((e.clientY - r.top)  / r.height) * captured.height;
     const pt: Pt = {
-      x: Math.max(0, Math.min(captured.width,  ((e.clientX - r.left) / r.width)  * captured.width)),
-      y: Math.max(0, Math.min(captured.height, ((e.clientY - r.top)  / r.height) * captured.height)),
+      x: Math.max(0, Math.min(captured.width,  rawX)),
+      y: Math.max(0, Math.min(captured.height, rawY)),
     };
-    const nc = [...corners] as Corners; nc[dragging] = pt; setCorners(nc);
+
+    if (scannerMode === "id") {
+      // Locked-ratio resize: opposite corner (idx XOR 2) stays fixed
+      // corners always stored as [TL, TR, BR, BL] in ID mode
+      const oppIdx = dragging ^ 2;          // 0↔2, 1↔3
+      const opp = corners[oppIdx];
+
+      // Raw deltas from opposite corner to dragged point
+      let dx = Math.abs(pt.x - opp.x);
+      let dy = Math.abs(pt.y - opp.y);
+
+      // Enforce ID_RATIO: expand whichever axis is too small
+      if (dx / Math.max(dy, 0.001) > ID_RATIO) {
+        dy = dx / ID_RATIO;
+      } else {
+        dx = dy * ID_RATIO;
+      }
+
+      // Direction signs based on which side the drag went
+      const sx = pt.x >= opp.x ? 1 : -1;
+      const sy = pt.y >= opp.y ? 1 : -1;
+
+      // New dragged corner position (clamped)
+      const nx = Math.max(0, Math.min(captured.width,  opp.x + sx * dx));
+      const ny = Math.max(0, Math.min(captured.height, opp.y + sy * dy));
+
+      // Rebuild all 4 corners as a clean rectangle
+      const x0 = Math.min(opp.x, nx), y0 = Math.min(opp.y, ny);
+      const x1 = Math.max(opp.x, nx), y1 = Math.max(opp.y, ny);
+      setCorners(idCornersFromBox(x0, y0, x1, y1));
+    } else {
+      const nc = [...corners] as Corners; nc[dragging] = pt; setCorners(nc);
+    }
   };
   const onPtrUp = () => setDragging(null);
 
@@ -624,10 +666,16 @@ export default function Scanner() {
       {phase === "captured" && captured && corners && (
         <div className="flex flex-col">
           {/* Instruction banner */}
-          <div className="bg-indigo-50 border-b border-indigo-100 px-4 py-2.5 text-center">
+          <div className="bg-indigo-50 border-b border-indigo-100 px-4 py-2.5 text-center flex items-center justify-center gap-2 flex-wrap">
             <p className="text-sm text-indigo-700 font-medium">
-              Drag the <span className="font-bold">blue circles</span> to align the 4 corners of your document
+              Drag the <span className="font-bold">blue circles</span> to align{" "}
+              {scannerMode === "id" ? "your ID card" : "the 4 corners of your document"}
             </p>
+            {scannerMode === "id" && (
+              <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-700 text-xs font-semibold px-2 py-0.5 rounded-full border border-amber-200">
+                🔒 1.6:1 ratio locked
+              </span>
+            )}
           </div>
 
           {/* Image + draggable corner handles */}
