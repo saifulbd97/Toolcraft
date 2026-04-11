@@ -9,27 +9,25 @@ services:
     name: tolyx-app
     runtime: node
     plan: free
-    buildCommand: >-
-      npm install -g pnpm@10 &&
-      pnpm install &&
-      BASE_PATH=/ pnpm --filter @workspace/pdf-merger run build &&
-      pnpm --filter @workspace/api-server run build
-    startCommand: node --enable-source-maps artifacts/api-server/dist/index.mjs
+    buildCommand: npm install -g pnpm@10 && pnpm install && pnpm run build:prod
+    startCommand: npm start
     healthCheckPath: /api/healthz
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: 10000
       - key: SESSION_SECRET
         generateValue: true
       - key: DATABASE_URL
         fromDatabase:
           name: tolyx-db
           property: connectionString
-      # Set these manually in the Render dashboard:
+      # Set these manually in the Render dashboard after first deploy:
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
-      # Set to your Render app URL once deployed, e.g. https://tolyx-app.onrender.com
+      # Set to your Render app URL, e.g. https://tolyx-app.onrender.com
       - key: APP_URL
         sync: false
