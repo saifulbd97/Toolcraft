@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 
 const router = Router();
 
-router.post("/api/bg-remove", async (req: Request, res: Response) => {
+router.post("/bg-remove", async (req: Request, res: Response) => {
   try {
     const { image } = req.body as { image?: string };
     if (!image || typeof image !== "string") {
