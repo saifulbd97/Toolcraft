@@ -7,8 +7,5 @@
     "dev": "node build.mjs && node --enable-source-maps dist/index.mjs",
     "build": "node build.mjs",
     "start": "node --enable-source-maps dist/index.mjs"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.88.0"
   }
 }
