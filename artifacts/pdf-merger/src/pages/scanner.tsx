@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 import {
-  ArrowLeft, Camera, CameraOff, CheckCircle, Download,
-  FileDown, FlipHorizontal, Image as ImageIcon, Loader2,
-  RefreshCcw, ScanLine,
+  ArrowLeft, Camera, CameraOff, CheckCircle, ClipboardCopy,
+  ExternalLink, FileDown, FlipHorizontal, Image as ImageIcon,
+  Loader2, QrCode, RefreshCcw, ScanLine,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -12,6 +12,32 @@ interface Pt { x: number; y: number }
 type Corners = [Pt, Pt, Pt, Pt];
 type Phase = "loading" | "idle" | "scanning" | "captured" | "result";
 type EnhanceMode = "bw" | "grayscale" | "color";
+type ScannerMode = "document" | "id" | "receipt" | "qr";
+
+const MODE_META: Record<ScannerMode, { label: string; defaultEnhance: EnhanceMode; hint: string }> = {
+  document: { label: "Document Scan",  defaultEnhance: "bw",        hint: "Point at a document — edges highlight automatically" },
+  id:       { label: "ID Card",        defaultEnhance: "color",     hint: "Align your ID card with the yellow guide" },
+  receipt:  { label: "Receipt",        defaultEnhance: "grayscale", hint: "Hold the receipt upright within the guide" },
+  qr:       { label: "QR Code",        defaultEnhance: "color",     hint: "Point camera at a QR code to scan instantly" },
+};
+
+function modeDefaultCorners(w: number, h: number, mode: ScannerMode): Corners {
+  if (mode === "id") {
+    // ISO/IEC 7810 ID-1: 85.6 × 54 mm → ratio ≈ 1.586 landscape
+    const cw = Math.min(w * 0.78, h * 0.55 * 1.586);
+    const ch = cw / 1.586;
+    const x0 = (w - cw) / 2, y0 = (h - ch) / 2;
+    return [{ x: x0, y: y0 }, { x: x0 + cw, y: y0 }, { x: x0 + cw, y: y0 + ch }, { x: x0, y: y0 + ch }];
+  }
+  if (mode === "receipt") {
+    // Tall narrow portrait ~1:2.8
+    const rw = Math.min(w * 0.52, h * 0.3);
+    const rh = Math.min(h * 0.84, rw * 2.8);
+    const x0 = (w - rw) / 2, y0 = (h - rh) / 2;
+    return [{ x: x0, y: y0 }, { x: x0 + rw, y: y0 }, { x: x0 + rw, y: y0 + rh }, { x: x0, y: y0 + rh }];
+  }
+  return defaultCorners(w, h);
+}
 
 // ─── OpenCV loader ─────────────────────────────────────────────────────────
 let cvPromise: Promise<boolean> | null = null;
@@ -242,23 +268,34 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function Scanner() {
+  // Read scanner mode from URL (component remounts on each navigation)
+  const scannerMode = useMemo((): ScannerMode => {
+    const m = new URLSearchParams(window.location.search).get("mode") ?? "document";
+    return (["document", "id", "receipt", "qr"] as const).includes(m as ScannerMode)
+      ? (m as ScannerMode) : "document";
+  }, []);
+  const meta = MODE_META[scannerMode];
+
   const [phase, setPhase] = useState<Phase>("loading");
   const [cvReady, setCvReady] = useState(false);
   const [captured, setCaptured] = useState<HTMLCanvasElement | null>(null);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [corners, setCorners] = useState<Corners | null>(null);
-  const [mode, setMode] = useState<EnhanceMode>("bw");
+  const [mode, setMode] = useState<EnhanceMode>(meta.defaultEnhance);
   const [facing, setFacing] = useState<"environment" | "user">("environment");
   const [dragging, setDragging] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [camReady, setCamReady] = useState(false);
+  const [qrResult, setQrResult] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const detectTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const qrTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     loadOpenCV().then(ok => { setCvReady(ok); setPhase("idle"); });
@@ -266,6 +303,7 @@ export default function Scanner() {
 
   const stopCam = useCallback(() => {
     if (detectTimer.current) { clearInterval(detectTimer.current); detectTimer.current = null; }
+    if (qrTimer.current) { clearInterval(qrTimer.current); qrTimer.current = null; }
     streamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null;
   }, []);
@@ -302,9 +340,35 @@ export default function Scanner() {
     return () => video.removeEventListener("loadedmetadata", onMeta);
   }, [phase]);
 
-  // Edge-detection loop — starts once camera is ready
+  // Edge-detection (document) OR QR scanning — starts once camera is ready
   useEffect(() => {
-    if (!camReady || !cvReady) return;
+    if (!camReady) return;
+
+    if (scannerMode === "qr") {
+      // QR scanning loop using jsQR
+      import("jsqr").then(({ default: jsQR }) => {
+        qrTimer.current = setInterval(() => {
+          const v = videoRef.current;
+          if (!v || !v.videoWidth) return;
+          const tmp = document.createElement("canvas");
+          tmp.width = v.videoWidth; tmp.height = v.videoHeight;
+          tmp.getContext("2d")!.drawImage(v, 0, 0);
+          const imgData = tmp.getContext("2d")!.getImageData(0, 0, tmp.width, tmp.height);
+          const code = jsQR(imgData.data, tmp.width, tmp.height, { inversionAttempts: "dontInvert" });
+          if (code?.data) {
+            setQrResult(code.data);
+            stopCam();
+            setPhase("result");
+          }
+        }, 150);
+      });
+      return () => {
+        if (qrTimer.current) { clearInterval(qrTimer.current); qrTimer.current = null; }
+      };
+    }
+
+    // Document/ID/Receipt — edge detection with OpenCV (if ready)
+    if (!cvReady) return;
     detectTimer.current = setInterval(() => {
       const v = videoRef.current;
       const ov = overlayRef.current;
@@ -337,7 +401,7 @@ export default function Scanner() {
     return () => {
       if (detectTimer.current) { clearInterval(detectTimer.current); detectTimer.current = null; }
     };
-  }, [camReady, cvReady]);
+  }, [camReady, cvReady, scannerMode, stopCam]);
 
   const startCam = useCallback(async (f: "environment" | "user" = "environment") => {
     setErr(null);
@@ -381,14 +445,14 @@ export default function Scanner() {
     const v = videoRef.current;
     if (!v || !v.videoWidth || !v.videoHeight) return;
     const c = document.createElement("canvas");
-    c.width = v.videoWidth || 640; c.height = v.videoHeight || 480;
+    c.width = v.videoWidth; c.height = v.videoHeight;
     c.getContext("2d")!.drawImage(v, 0, 0);
     stopCam();
-    const detected = detectCorners(c);
-    setCorners(detected ?? defaultCorners(c.width, c.height));
+    const detected = scannerMode !== "qr" ? detectCorners(c) : null;
+    setCorners(detected ?? modeDefaultCorners(c.width, c.height, scannerMode));
     setCaptured(c);
     setPhase("captured");
-  }, [stopCam]);
+  }, [stopCam, scannerMode]);
 
   const process = useCallback(async (overrideMode?: EnhanceMode) => {
     if (!captured || !corners) return;
@@ -443,8 +507,15 @@ export default function Scanner() {
 
   const reset = useCallback(() => {
     stopCam(); setCaptured(null); setResultUrl(null); setCorners(null);
-    setErr(null); setMode("bw"); setCamReady(false); setPhase("idle");
-  }, [stopCam]);
+    setQrResult(null); setCopied(false);
+    setErr(null); setMode(meta.defaultEnhance); setCamReady(false); setPhase("idle");
+  }, [stopCam, meta.defaultEnhance]);
+
+  const copyToClipboard = useCallback((text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true); setTimeout(() => setCopied(false), 2000);
+    });
+  }, []);
 
   const flipCam = useCallback(() => {
     const next = facing === "environment" ? "user" : "environment";
@@ -488,9 +559,11 @@ export default function Scanner() {
       <div className="sticky top-14 z-40 flex items-center gap-3 px-4 py-2.5 border-b border-border bg-white/90 backdrop-blur">
         <Link href="/"><button className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors"><ArrowLeft className="w-4 h-4" />Back</button></Link>
         <div className="h-4 w-px bg-border" />
-        <ScanLine className="w-4 h-4 text-amber-500" />
-        <span className="font-semibold text-sm">Document Scanner</span>
-        {!cvReady && phase !== "loading" && (
+        {scannerMode === "qr"
+          ? <QrCode className="w-4 h-4 text-amber-500" />
+          : <ScanLine className="w-4 h-4 text-amber-500" />}
+        <span className="font-semibold text-sm">{meta.label}</span>
+        {!cvReady && phase !== "loading" && scannerMode !== "qr" && (
           <span className="ml-auto text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">Basic mode</span>
         )}
       </div>
@@ -509,15 +582,36 @@ export default function Scanner() {
 
       {/* IDLE */}
       {phase === "idle" && (
-        <div className="flex flex-col items-center justify-center min-h-[72vh] px-6 text-center gap-8">
+        <div className="flex flex-col items-center justify-center min-h-[72vh] px-6 text-center gap-6">
           <div className="w-20 h-20 rounded-2xl bg-amber-50 border border-amber-100 flex items-center justify-center">
-            <ScanLine className="w-10 h-10 text-amber-500" />
+            {scannerMode === "qr"
+              ? <QrCode className="w-10 h-10 text-amber-500" />
+              : <ScanLine className="w-10 h-10 text-amber-500" />}
           </div>
           <div>
-            <h1 className="text-2xl font-bold mb-2">Document Scanner</h1>
+            <h1 className="text-2xl font-bold mb-2">{meta.label}</h1>
             <p className="text-muted-foreground max-w-xs text-sm leading-relaxed">
-              Point your camera at a document. {cvReady ? "Edges will be detected automatically." : "Adjust corners manually after capture."}
+              {scannerMode === "qr"
+                ? "Point your camera at any QR code to instantly decode it."
+                : scannerMode === "id"
+                ? "Place your ID card on a flat surface and capture it."
+                : scannerMode === "receipt"
+                ? "Hold the receipt upright and capture for a clean scan."
+                : cvReady ? "Point at a document — edges are detected automatically." : "Capture the document and adjust corners manually."}
             </p>
+          </div>
+          {/* Mode selector pills */}
+          <div className="flex flex-wrap gap-2 justify-center">
+            {(["document", "id", "receipt", "qr"] as ScannerMode[]).map(m => (
+              <a key={m} href={`?mode=${m}`}
+                className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+                  m === scannerMode
+                    ? "bg-amber-500 text-white border-amber-500"
+                    : "bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
+                }`}>
+                {MODE_META[m].label}
+              </a>
+            ))}
           </div>
           <Button onClick={() => startCam(facing)} size="lg" className="gap-2 px-10">
             <Camera className="w-5 h-5" /> Start Camera
@@ -549,11 +643,40 @@ export default function Scanner() {
                 <p className="text-white text-sm">Starting camera…</p>
               </div>
             )}
+            {/* ID card guide rectangle */}
+            {camReady && scannerMode === "id" && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+                <div className="border-2 border-yellow-400 rounded-lg shadow-lg"
+                  style={{ width: "75%", aspectRatio: "85.6/54", boxShadow: "0 0 0 1000px rgba(0,0,0,0.45)" }} />
+              </div>
+            )}
+            {/* Receipt guide rectangle */}
+            {camReady && scannerMode === "receipt" && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+                <div className="border-2 border-yellow-400 rounded-lg"
+                  style={{ width: "45%", aspectRatio: "1/2.8", boxShadow: "0 0 0 1000px rgba(0,0,0,0.45)" }} />
+              </div>
+            )}
+            {/* QR scanning crosshair */}
+            {camReady && scannerMode === "qr" && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+                <div className="relative w-52 h-52">
+                  {/* Corner brackets */}
+                  {[["top-0 left-0 border-t-2 border-l-2",""],["top-0 right-0 border-t-2 border-r-2",""],
+                    ["bottom-0 left-0 border-b-2 border-l-2",""],["bottom-0 right-0 border-b-2 border-r-2",""]].map(([cls],i) => (
+                    <div key={i} className={`absolute w-8 h-8 border-amber-400 ${cls} rounded-sm`} />
+                  ))}
+                  {/* Scan line animation */}
+                  <div className="absolute inset-x-0 h-0.5 bg-amber-400/80 animate-[scanLine_2s_ease-in-out_infinite]"
+                    style={{ animation: "scanLine 2s ease-in-out infinite" }} />
+                </div>
+              </div>
+            )}
             {/* Hint banner */}
-            {camReady && cvReady && (
-              <div className="absolute top-3 inset-x-0 flex justify-center pointer-events-none z-10">
+            {camReady && (
+              <div className="absolute bottom-3 inset-x-0 flex justify-center pointer-events-none z-10">
                 <span className="bg-black/60 text-white text-xs px-3 py-1.5 rounded-full backdrop-blur">
-                  Point at a document — edges highlight automatically
+                  {meta.hint}
                 </span>
               </div>
             )}
@@ -615,8 +738,37 @@ export default function Scanner() {
         </div>
       )}
 
-      {/* RESULT */}
-      {phase === "result" && (
+      {/* RESULT — QR mode */}
+      {phase === "result" && scannerMode === "qr" && qrResult && (
+        <div className="flex flex-col items-center px-4 py-8 gap-6 max-w-lg mx-auto w-full">
+          <div className="w-16 h-16 rounded-2xl bg-green-50 border border-green-100 flex items-center justify-center">
+            <QrCode className="w-8 h-8 text-green-600" />
+          </div>
+          <div className="text-center">
+            <p className="text-xs text-muted-foreground mb-1 uppercase tracking-wide font-medium">QR Code Decoded</p>
+            <div className="w-full max-w-sm rounded-xl border border-border bg-muted/50 px-4 py-3 text-sm break-all text-foreground font-mono">
+              {qrResult}
+            </div>
+          </div>
+          <div className="flex gap-3 w-full max-w-sm">
+            <Button variant="outline" onClick={() => copyToClipboard(qrResult)} className="flex-1 gap-2">
+              <ClipboardCopy className="w-4 h-4" />
+              {copied ? "Copied!" : "Copy"}
+            </Button>
+            {/^https?:\/\//i.test(qrResult) && (
+              <Button onClick={() => window.open(qrResult, "_blank")} className="flex-1 gap-2">
+                <ExternalLink className="w-4 h-4" /> Open URL
+              </Button>
+            )}
+          </div>
+          <Button variant="ghost" onClick={reset} className="gap-2 text-muted-foreground">
+            <RefreshCcw className="w-4 h-4" /> Scan Another
+          </Button>
+        </div>
+      )}
+
+      {/* RESULT — Document / ID / Receipt mode */}
+      {phase === "result" && scannerMode !== "qr" && (
         <div className="flex flex-col items-center px-4 py-6 gap-5 max-w-lg mx-auto w-full">
           <div className="w-full rounded-xl overflow-hidden border border-border shadow-md bg-white">
             {busy
