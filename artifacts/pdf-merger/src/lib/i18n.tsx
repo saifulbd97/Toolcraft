@@ -5,6 +5,18 @@ export type Lang = "en" | "bn";
 export interface Translations {
   langLabel: string;
   allTools: string;
+  backToHome: string;
+  comingSoon: string;
+  // Landing page
+  homeTagline: string;
+  homeTitle: string;
+  homeSubtitle: string;
+  homeFootnote: string;
+  categories: {
+    pdfTools: { title: string; description: string; tools: string[] };
+    scanner: { title: string; description: string; tools: string[] };
+    incomeCalc: { title: string; description: string; tools: string[] };
+  };
   dragToReorder: string;
   change: string;
   to: string;
@@ -116,7 +128,30 @@ export interface Translations {
 
 const en: Translations = {
   langLabel: "বাংলা",
-  allTools: "All tools",
+  allTools: "All PDF tools",
+  backToHome: "Back to Home",
+  comingSoon: "Coming Soon",
+  homeTagline: "Free tools for everyone",
+  homeTitle: "Your all-in-one toolkit",
+  homeSubtitle: "Powerful tools to work smarter — PDF utilities, scanning, and financial calculators, all in one place.",
+  homeFootnote: "More tools coming soon. All processing happens in your browser — your files stay private.",
+  categories: {
+    pdfTools: {
+      title: "PDF Tools",
+      description: "Merge, split, convert, and compress PDF files instantly without any software.",
+      tools: ["Merge", "Split", "JPG → PDF", "PDF → JPG", "Compress"],
+    },
+    scanner: {
+      title: "Scanner",
+      description: "Scan documents using your camera and export as high-quality PDF or image files.",
+      tools: ["Document Scan", "ID Card", "Receipt", "QR Code"],
+    },
+    incomeCalc: {
+      title: "Income Calculator",
+      description: "Calculate taxes, salary breakdowns, and financial projections with ease.",
+      tools: ["Tax Estimator", "Salary Breakdown", "Take-home Pay"],
+    },
+  },
   dragToReorder: "Drag to reorder",
   change: "Change",
   to: "to",
@@ -221,7 +256,30 @@ const en: Translations = {
 
 const bn: Translations = {
   langLabel: "English",
-  allTools: "সব টুলস",
+  allTools: "সব পিডিএফ টুলস",
+  backToHome: "হোমে ফিরুন",
+  comingSoon: "শীঘ্রই আসছে",
+  homeTagline: "সবার জন্য বিনামূল্যে টুলস",
+  homeTitle: "আপনার সম্পূর্ণ টুলকিট",
+  homeSubtitle: "স্মার্টভাবে কাজ করার জন্য শক্তিশালী টুলস — পিডিএফ ইউটিলিটি, স্ক্যানিং এবং আর্থিক ক্যালকুলেটর একটি জায়গায়।",
+  homeFootnote: "আরও টুলস শীঘ্রই আসছে। সমস্ত প্রক্রিয়াকরণ আপনার ব্রাউজারে হয় — আপনার ফাইল সুরক্ষিত থাকে।",
+  categories: {
+    pdfTools: {
+      title: "পিডিএফ টুলস",
+      description: "কোনো সফটওয়্যার ছাড়াই তাৎক্ষণিকভাবে পিডিএফ মার্জ, স্প্লিট, রূপান্তর ও কম্প্রেস করুন।",
+      tools: ["মার্জ", "স্প্লিট", "JPG → PDF", "PDF → JPG", "কম্প্রেস"],
+    },
+    scanner: {
+      title: "স্ক্যানার",
+      description: "ক্যামেরা ব্যবহার করে ডকুমেন্ট স্ক্যান করুন এবং উচ্চমানের পিডিএফ বা ছবি হিসেবে রপ্তানি করুন।",
+      tools: ["ডকুমেন্ট স্ক্যান", "পরিচয়পত্র", "রসিদ", "QR কোড"],
+    },
+    incomeCalc: {
+      title: "আয় ক্যালকুলেটর",
+      description: "কর, বেতন বিভাজন এবং আর্থিক পূর্বাভাস সহজে হিসাব করুন।",
+      tools: ["কর অনুমান", "বেতন বিভাজন", "নিট বেতন"],
+    },
+  },
   dragToReorder: "ক্রম পরিবর্তনে টেনে আনুন",
   change: "পরিবর্তন করুন",
   to: "থেকে",

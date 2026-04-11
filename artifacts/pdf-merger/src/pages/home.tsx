@@ -116,7 +116,7 @@ export default function Home() {
     <div className="min-h-[100dvh] w-full bg-background flex flex-col items-center py-12 px-4 sm:px-6 lg:px-8">
       <div className="w-full max-w-2xl space-y-8">
         <div className="flex items-center mb-2">
-          <Link href="/"><Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground hover:text-foreground -ml-2" data-testid="button-back-home"><ArrowLeft className="w-4 h-4" />{t.allTools}</Button></Link>
+          <Link href="/pdf"><Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground hover:text-foreground -ml-2" data-testid="button-back-home"><ArrowLeft className="w-4 h-4" />{t.allTools}</Button></Link>
         </div>
 
         <div className="text-center space-y-2">

@@ -5,6 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { LanguageProvider } from "@/lib/i18n";
 import { LanguageToggle } from "@/components/LanguageToggle";
 import NotFound from "@/pages/not-found";
+import Landing from "@/pages/landing";
 import Dashboard from "@/pages/dashboard";
 import MergePdf from "@/pages/home";
 import JpgToPdf from "@/pages/jpg-to-pdf";
@@ -17,12 +18,13 @@ const queryClient = new QueryClient();
 function Router() {
   return (
     <Switch>
-      <Route path="/" component={Dashboard} />
-      <Route path="/merge" component={MergePdf} />
-      <Route path="/jpg-to-pdf" component={JpgToPdf} />
-      <Route path="/pdf-to-jpg" component={PdfToJpg} />
-      <Route path="/split" component={Split} />
-      <Route path="/compress" component={Compress} />
+      <Route path="/" component={Landing} />
+      <Route path="/pdf" component={Dashboard} />
+      <Route path="/pdf/merge" component={MergePdf} />
+      <Route path="/pdf/jpg-to-pdf" component={JpgToPdf} />
+      <Route path="/pdf/pdf-to-jpg" component={PdfToJpg} />
+      <Route path="/pdf/split" component={Split} />
+      <Route path="/pdf/compress" component={Compress} />
       <Route component={NotFound} />
     </Switch>
   );

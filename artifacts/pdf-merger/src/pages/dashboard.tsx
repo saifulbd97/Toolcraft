@@ -1,16 +1,17 @@
 import { Link } from "wouter";
 import { motion } from "framer-motion";
-import { Layers, ImagePlus, FileImage, Scissors, FileArchive } from "lucide-react";
+import { Layers, ImagePlus, FileImage, Scissors, FileArchive, ArrowLeft } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { useTranslation } from "@/lib/i18n";
 
 const toolKeys = ["merge", "jpgToPdf", "pdfToJpg", "split", "compress"] as const;
 
 const toolMeta = {
-  merge:    { icon: Layers,       href: "/merge",      color: "bg-indigo-500",  lightColor: "bg-indigo-50",  textColor: "text-indigo-600",  borderColor: "hover:border-indigo-200",  shadowColor: "hover:shadow-indigo-100" },
-  jpgToPdf: { icon: ImagePlus,    href: "/jpg-to-pdf", color: "bg-orange-500",  lightColor: "bg-orange-50",  textColor: "text-orange-600",  borderColor: "hover:border-orange-200",  shadowColor: "hover:shadow-orange-100" },
-  pdfToJpg: { icon: FileImage,    href: "/pdf-to-jpg", color: "bg-emerald-500", lightColor: "bg-emerald-50", textColor: "text-emerald-600", borderColor: "hover:border-emerald-200", shadowColor: "hover:shadow-emerald-100" },
-  split:    { icon: Scissors,     href: "/split",      color: "bg-purple-500",  lightColor: "bg-purple-50",  textColor: "text-purple-600",  borderColor: "hover:border-purple-200",  shadowColor: "hover:shadow-purple-100" },
-  compress: { icon: FileArchive,  href: "/compress",   color: "bg-sky-500",     lightColor: "bg-sky-50",     textColor: "text-sky-600",     borderColor: "hover:border-sky-200",     shadowColor: "hover:shadow-sky-100" },
+  merge:    { icon: Layers,       href: "/pdf/merge",      color: "bg-indigo-500",  lightColor: "bg-indigo-50",  textColor: "text-indigo-600",  borderColor: "hover:border-indigo-200",  shadowColor: "hover:shadow-indigo-100" },
+  jpgToPdf: { icon: ImagePlus,    href: "/pdf/jpg-to-pdf", color: "bg-orange-500",  lightColor: "bg-orange-50",  textColor: "text-orange-600",  borderColor: "hover:border-orange-200",  shadowColor: "hover:shadow-orange-100" },
+  pdfToJpg: { icon: FileImage,    href: "/pdf/pdf-to-jpg", color: "bg-emerald-500", lightColor: "bg-emerald-50", textColor: "text-emerald-600", borderColor: "hover:border-emerald-200", shadowColor: "hover:shadow-emerald-100" },
+  split:    { icon: Scissors,     href: "/pdf/split",      color: "bg-purple-500",  lightColor: "bg-purple-50",  textColor: "text-purple-600",  borderColor: "hover:border-purple-200",  shadowColor: "hover:shadow-purple-100" },
+  compress: { icon: FileArchive,  href: "/pdf/compress",   color: "bg-sky-500",     lightColor: "bg-sky-50",     textColor: "text-sky-600",     borderColor: "hover:border-sky-200",     shadowColor: "hover:shadow-sky-100" },
 };
 
 const containerVariants = {
@@ -29,6 +30,14 @@ export default function Dashboard() {
   return (
     <div className="min-h-[100dvh] w-full bg-background">
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-16 sm:py-20">
+        <div className="mb-10">
+          <Link href="/">
+            <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground hover:text-foreground -ml-2" data-testid="button-back-home">
+              <ArrowLeft className="w-4 h-4" />{t.backToHome}
+            </Button>
+          </Link>
+        </div>
+
         <div className="text-center mb-14">
           <h1 className="text-4xl sm:text-5xl font-bold tracking-tight text-foreground mb-4">
             {t.dashTitle}
@@ -53,7 +62,7 @@ export default function Dashboard() {
                 <Link href={meta.href}>
                   <div
                     className={`group relative bg-card border border-border rounded-2xl p-6 cursor-pointer transition-all duration-200 hover:-translate-y-1 hover:shadow-lg ${meta.borderColor} ${meta.shadowColor}`}
-                    data-testid={`card-tool-${meta.href.replace("/", "")}`}
+                    data-testid={`card-tool-${key}`}
                   >
                     <div className={`inline-flex items-center justify-center w-14 h-14 rounded-xl ${meta.lightColor} ${meta.textColor} mb-5 transition-transform duration-200 group-hover:scale-110`}>
                       <Icon className="w-7 h-7" />

@@ -18,15 +18,20 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 
 ## Artifacts
 
-### PDF Tools App (`artifacts/pdf-merger`)
+### Multi-Tools Web App (`artifacts/pdf-merger`)
 - React + Vite single-page app at preview path `/`
 - Full bilingual support (English + Bengali) via i18n context
-- Tools available:
-  - **Merge PDF** (`/merge`) — combine multiple PDFs and images (JPG/PNG) into one document
-  - **JPG to PDF** (`/jpg-to-pdf`) — convert JPG/PNG images into a single PDF
-  - **PDF to JPG** (`/pdf-to-jpg`) — convert every PDF page into high-quality JPG images, downloaded as ZIP
-  - **Split PDF** (`/split`) — split into individual pages (ZIP) or extract a page range
-  - **Compress PDF** (`/compress`) — compress PDFs using Ghostscript with low/medium/high quality
+- **Route structure:**
+  - `/` — Home page with 3 category cards (PDF Tools, Scanner, Income Calculator)
+  - `/pdf` — PDF tools dashboard (grid of all 5 tools, with "Back to Home" link)
+  - `/pdf/merge` — Merge PDF: combine multiple PDFs and images into one document
+  - `/pdf/jpg-to-pdf` — JPG to PDF: convert JPG/PNG images into a single PDF
+  - `/pdf/pdf-to-jpg` — PDF to JPG: convert every PDF page into high-quality JPG images (ZIP)
+  - `/pdf/split` — Split PDF: split into individual pages (ZIP) or extract a page range
+  - `/pdf/compress` — Compress PDF: compress PDFs using Ghostscript (low/medium/high)
+  - `/scanner` — Coming Soon (Scanner category)
+  - `/income-calculator` — Coming Soon (Income Calculator category)
+- Each PDF tool page has a "Back to PDF tools" button that returns to `/pdf`
 
 ### API Server (`artifacts/api-server`)
 - Express 5 backend at `/api` (port 8080)
