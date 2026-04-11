@@ -198,10 +198,12 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
     return out;
   }
 
-  // ── Clean: illumination normalisation → contrast punch → unsharp mask ────
-  // 1. Divide by large-blur background  → paper ~230, text stays dark
-  // 2. Contrast: alpha 1.1, beta -12    → paper ~241, text darker, no clip
-  // 3. Unsharp mask (strength 0.8)      → text edges crisp, no blur/fade
+  // ── Clean: HD illumination pipeline ─────────────────────────────────────
+  // 1. Mild 3×3 denoise        → remove camera grain, keep edges
+  // 2. ÷ 91×91 background blur → illuminate-normalise (paper → 230)
+  // 3. Contrast α1.15 β-18     → paper → 247, text → darker
+  // 4. Unsharp pass 1 (5×5 ref, ×1.2) → broad edge / stroke clarity
+  // 5. Unsharp pass 2 (3×3 ref, ×0.6) → micro-detail / fine strokes
   if (mode === "clean") {
     if (cv?.Mat) {
       try {
@@ -209,43 +211,47 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
         const bgr = t(new cv.Mat());
         cv.cvtColor(mat, bgr, cv.COLOR_RGBA2BGR);
 
-        // Float for division
-        const bgr32 = t(new cv.Mat());
-        bgr.convertTo(bgr32, cv.CV_32F);
+        // Step 1: mild denoise — removes grain without softening text edges
+        const denoised = t(new cv.Mat());
+        cv.GaussianBlur(bgr, denoised, new cv.Size(3, 3), 0.8);
 
-        // Large Gaussian → local illumination estimate
-        const blur32 = t(new cv.Mat());
-        cv.GaussianBlur(bgr32, blur32, new cv.Size(91, 91), 0);
-
-        // Divide by background → paper ≈ 230, dark text stays dark
+        // Step 2: illumination normalisation
+        const den32 = t(new cv.Mat());
+        denoised.convertTo(den32, cv.CV_32F);
+        const bgBlur32 = t(new cv.Mat());
+        cv.GaussianBlur(den32, bgBlur32, new cv.Size(91, 91), 0);
         const norm32 = t(new cv.Mat());
-        cv.divide(bgr32, blur32, norm32, 230.0);
-
-        // Back to uint8
+        cv.divide(den32, bgBlur32, norm32, 230.0);
         const norm8 = t(new cv.Mat());
         norm32.convertTo(norm8, cv.CV_8U);
 
-        // Contrast boost: paper(230)→241, dark text gets slightly darker
-        // alpha=1.1 beta=-12  →  v_out = clamp(v*1.1 - 12)
+        // Step 3: contrast boost — paper(230)→247, dark text pushed darker
         const contrasted = t(new cv.Mat());
-        cv.convertScaleAbs(norm8, contrasted, 1.1, -12);
+        cv.convertScaleAbs(norm8, contrasted, 1.15, -18);
 
-        // Unsharp mask: sharpened = 1.8×src − 0.8×blur3
-        // Brings back fine text strokes lost during the broad normalisation blur
+        // Step 4: broad unsharp mask (5×5 reference)
+        // out = src + 1.2×(src − blur5) = 2.2×src − 1.2×blur5
+        const blur5 = t(new cv.Mat());
+        cv.GaussianBlur(contrasted, blur5, new cv.Size(5, 5), 0);
+        const sharp1 = t(new cv.Mat());
+        cv.addWeighted(contrasted, 2.2, blur5, -1.2, 0, sharp1);
+
+        // Step 5: fine unsharp mask (3×3 reference) — micro-detail / thin strokes
+        // out = sharp1 + 0.6×(sharp1 − blur3) = 1.6×sharp1 − 0.6×blur3
         const blur3 = t(new cv.Mat());
-        cv.GaussianBlur(contrasted, blur3, new cv.Size(3, 3), 0);
-        const sharpened = t(new cv.Mat());
-        cv.addWeighted(contrasted, 1.8, blur3, -0.8, 0, sharpened);
+        cv.GaussianBlur(sharp1, blur3, new cv.Size(3, 3), 0);
+        const sharp2 = t(new cv.Mat());
+        cv.addWeighted(sharp1, 1.6, blur3, -0.6, 0, sharp2);
 
         const rgbaOut = t(new cv.Mat());
-        cv.cvtColor(sharpened, rgbaOut, cv.COLOR_BGR2RGBA);
+        cv.cvtColor(sharp2, rgbaOut, cv.COLOR_BGR2RGBA);
         cv.imshow(out, rgbaOut);
         cleanup();
         return out;
       } catch { cleanup(); }
     }
 
-    // ── Pure-JS fallback ────────────────────────────────────────────────────
+    // ── Pure-JS fallback (same HD logic without OpenCV) ──────────────────────
     ctx.drawImage(src, 0, 0);
     const img = ctx.getImageData(0, 0, out.width, out.height);
     const { data: d, width: W, height: H } = img;
@@ -258,7 +264,7 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
       lum[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
     }
 
-    // Separable box blur — radius ≈ 8 % of shorter side
+    // Separable box blur — radius ≈ 8% of shorter side (background estimate)
     const R = Math.max(20, Math.round(Math.min(W, H) * 0.08));
     const tmp = new Float32Array(N);
     for (let y = 0; y < H; y++) {
@@ -280,32 +286,45 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
       }
     }
 
-    // Step 1: normalise + contrast curve → Float32 buffer for sharpening
+    // Normalise + contrast curve → Float32 for two-pass sharpening
     const norm = new Float32Array(N * 3);
     for (let i = 0; i < N; i++) {
       const bgVal = Math.max(12, bg[i]);
       const scale = 230 / bgVal;
       const j = i * 4;
       for (let c = 0; c < 3; c++) {
-        norm[i * 3 + c] = Math.min(255, Math.max(0, d[j + c] * scale * 1.1 - 12));
+        norm[i * 3 + c] = Math.min(255, Math.max(0, d[j + c] * scale * 1.15 - 18));
       }
     }
 
-    // Step 2: 5-tap unsharp mask (no extra blur pass needed)
-    // blur5 = (center + N + S + E + W) / 5
-    // sharpened = center + 0.8 × (center − blur5)
+    // Pass 1: 5-tap unsharp, strength 1.2 (broad strokes / letter bodies)
+    const sharp = new Float32Array(N * 3);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        for (let c = 0; c < 3; c++) {
+          const ctr = norm[i * 3 + c];
+          const n_ = y > 0     ? norm[(i - W) * 3 + c] : ctr;
+          const s_ = y < H - 1 ? norm[(i + W) * 3 + c] : ctr;
+          const e_ = x < W - 1 ? norm[(i + 1) * 3 + c] : ctr;
+          const w_ = x > 0     ? norm[(i - 1) * 3 + c] : ctr;
+          sharp[i * 3 + c] = Math.min(255, Math.max(0, ctr + 1.2 * (ctr - (ctr + n_ + s_ + e_ + w_) / 5)));
+        }
+      }
+    }
+
+    // Pass 2: 5-tap unsharp on sharp[], strength 0.6 (fine strokes / serifs)
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
         const i = y * W + x;
         const j = i * 4;
         for (let c = 0; c < 3; c++) {
-          const center = norm[i * 3 + c];
-          const n_ = y > 0     ? norm[(i - W) * 3 + c] : center;
-          const s_ = y < H - 1 ? norm[(i + W) * 3 + c] : center;
-          const e_ = x < W - 1 ? norm[(i + 1) * 3 + c] : center;
-          const w_ = x > 0     ? norm[(i - 1) * 3 + c] : center;
-          const blur5 = (center + n_ + s_ + e_ + w_) / 5;
-          d[j + c] = Math.min(255, Math.max(0, Math.round(center + 0.8 * (center - blur5))));
+          const ctr = sharp[i * 3 + c];
+          const n_ = y > 0     ? sharp[(i - W) * 3 + c] : ctr;
+          const s_ = y < H - 1 ? sharp[(i + W) * 3 + c] : ctr;
+          const e_ = x < W - 1 ? sharp[(i + 1) * 3 + c] : ctr;
+          const w_ = x > 0     ? sharp[(i - 1) * 3 + c] : ctr;
+          d[j + c] = Math.min(255, Math.max(0, Math.round(ctr + 0.6 * (ctr - (ctr + n_ + s_ + e_ + w_) / 5))));
         }
       }
     }
