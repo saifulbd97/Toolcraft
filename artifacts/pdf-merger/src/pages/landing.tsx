@@ -1,4 +1,4 @@
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import { motion } from "framer-motion";
 import { FileText, ScanLine, Calculator, ArrowRight, Sparkles } from "lucide-react";
 import { useTranslation } from "@/lib/i18n";
@@ -144,6 +144,8 @@ interface CardContentProps {
 
 function CategoryCardContent({ cat, Icon, info, comingSoon }: CardContentProps) {
   const { t } = useTranslation();
+  const [, navigate] = useLocation();
+  const scannerModes = ["document", "id", "receipt", "qr"];
   return (
     <>
       <div className="flex items-start justify-between mb-5">
@@ -163,11 +165,22 @@ function CategoryCardContent({ cat, Icon, info, comingSoon }: CardContentProps) 
       <p className="text-sm text-muted-foreground leading-relaxed mb-5">{info.description}</p>
 
       <div className="flex flex-wrap gap-1.5">
-        {info.tools.map((tool) => (
-          <span key={tool} className={`text-[11px] font-medium px-2 py-0.5 rounded-md ${cat.lightColor} ${cat.textColor}`}>
-            {tool}
-          </span>
-        ))}
+        {info.tools.map((tool, idx) => {
+          const isScanner = cat.key === "scanner" && !comingSoon;
+          return isScanner ? (
+            <button
+              key={tool}
+              onClick={e => { e.preventDefault(); e.stopPropagation(); navigate(`/scanner?mode=${scannerModes[idx]}`); }}
+              className={`text-[11px] font-medium px-2 py-0.5 rounded-md cursor-pointer hover:opacity-75 transition-opacity ${cat.lightColor} ${cat.textColor}`}
+            >
+              {tool}
+            </button>
+          ) : (
+            <span key={tool} className={`text-[11px] font-medium px-2 py-0.5 rounded-md ${cat.lightColor} ${cat.textColor}`}>
+              {tool}
+            </span>
+          );
+        })}
       </div>
 
       <div className={`absolute bottom-0 left-0 h-0.5 w-0 rounded-b-2xl ${cat.barColor} transition-all duration-300 group-hover:w-full`} />
