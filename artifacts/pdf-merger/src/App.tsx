@@ -13,6 +13,7 @@ import PdfToJpg from "@/pages/pdf-to-jpg";
 import Split from "@/pages/split";
 import Compress from "@/pages/compress";
 import About from "@/pages/about";
+import Scanner from "@/pages/scanner";
 
 const queryClient = new QueryClient();
 
@@ -57,6 +58,7 @@ function Router() {
     <Switch>
       <Route path="/" component={Landing} />
       <Route path="/about" component={About} />
+      <Route path="/scanner" component={Scanner} />
       <Route path="/pdf" component={Dashboard} />
       <Route path="/pdf/merge" component={MergePdf} />
       <Route path="/pdf/jpg-to-pdf" component={JpgToPdf} />
