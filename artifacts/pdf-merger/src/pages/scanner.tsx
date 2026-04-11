@@ -198,9 +198,10 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
     return out;
   }
 
-  // ── Clean: illumination normalization (CamScanner-style) ─────────────────
-  // Each pixel is divided by its local background → paper becomes light white,
-  // text stays dark, colors are preserved, no over-exposure.
+  // ── Clean: illumination normalisation → contrast punch → unsharp mask ────
+  // 1. Divide by large-blur background  → paper ~230, text stays dark
+  // 2. Contrast: alpha 1.1, beta -12    → paper ~241, text darker, no clip
+  // 3. Unsharp mask (strength 0.8)      → text edges crisp, no blur/fade
   if (mode === "clean") {
     if (cv?.Mat) {
       try {
@@ -208,69 +209,58 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
         const bgr = t(new cv.Mat());
         cv.cvtColor(mat, bgr, cv.COLOR_RGBA2BGR);
 
-        // Convert to float for division
+        // Float for division
         const bgr32 = t(new cv.Mat());
         bgr.convertTo(bgr32, cv.CV_32F);
 
-        // Large Gaussian blur = local background / illumination estimate
-        // Kernel 91 captures broad lighting gradients without edge bleeding
+        // Large Gaussian → local illumination estimate
         const blur32 = t(new cv.Mat());
         cv.GaussianBlur(bgr32, blur32, new cv.Size(91, 91), 0);
 
-        // Divide original by background, scale to target brightness 230
-        // → paper (pixel ≈ background) → ~230 (light white, not pure white ✓)
-        // → dark text (pixel << background) → stays dark ✓
-        // → colors preserved (uniform scale per pixel, all channels divided equally)
+        // Divide by background → paper ≈ 230, dark text stays dark
         const norm32 = t(new cv.Mat());
         cv.divide(bgr32, blur32, norm32, 230.0);
 
-        // Back to uint8 (divide already clips on conversion)
+        // Back to uint8
         const norm8 = t(new cv.Mat());
         norm32.convertTo(norm8, cv.CV_8U);
 
-        // Single gentle CLAHE pass on luminance only (clipLimit 1.2 = soft boost)
-        const lab = t(new cv.Mat());
-        cv.cvtColor(norm8, lab, cv.COLOR_BGR2Lab);
-        const chs = new cv.MatVector();
-        cv.split(lab, chs);
-        const lCh = t(chs.get(0));
-        try {
-          const clahe = t(new cv.CLAHE(1.2, new cv.Size(8, 8)));
-          clahe.apply(lCh, lCh);
-        } catch { /* CLAHE unavailable — skip */ }
-        chs.set(0, lCh);
-        const labOut = t(new cv.Mat());
-        cv.merge(chs, labOut);
-        chs.delete();
+        // Contrast boost: paper(230)→241, dark text gets slightly darker
+        // alpha=1.1 beta=-12  →  v_out = clamp(v*1.1 - 12)
+        const contrasted = t(new cv.Mat());
+        cv.convertScaleAbs(norm8, contrasted, 1.1, -12);
 
-        const bgrOut = t(new cv.Mat());
-        cv.cvtColor(labOut, bgrOut, cv.COLOR_Lab2BGR);
+        // Unsharp mask: sharpened = 1.8×src − 0.8×blur3
+        // Brings back fine text strokes lost during the broad normalisation blur
+        const blur3 = t(new cv.Mat());
+        cv.GaussianBlur(contrasted, blur3, new cv.Size(3, 3), 0);
+        const sharpened = t(new cv.Mat());
+        cv.addWeighted(contrasted, 1.8, blur3, -0.8, 0, sharpened);
+
         const rgbaOut = t(new cv.Mat());
-        cv.cvtColor(bgrOut, rgbaOut, cv.COLOR_BGR2RGBA);
+        cv.cvtColor(sharpened, rgbaOut, cv.COLOR_BGR2RGBA);
         cv.imshow(out, rgbaOut);
         cleanup();
         return out;
       } catch { cleanup(); }
     }
 
-    // Pure-JS fallback: large box blur → divide normalization → light white paper
+    // ── Pure-JS fallback ────────────────────────────────────────────────────
     ctx.drawImage(src, 0, 0);
     const img = ctx.getImageData(0, 0, out.width, out.height);
     const { data: d, width: W, height: H } = img;
     const N = W * H;
 
-    // Extract luminance
+    // Extract luminance for background estimation
     const lum = new Float32Array(N);
     for (let i = 0; i < N; i++) {
       const j = i * 4;
       lum[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
     }
 
-    // Separable box blur (horizontal then vertical), radius = ~8% of short side
+    // Separable box blur — radius ≈ 8 % of shorter side
     const R = Math.max(20, Math.round(Math.min(W, H) * 0.08));
     const tmp = new Float32Array(N);
-
-    // Horizontal pass
     for (let y = 0; y < H; y++) {
       const row = y * W;
       let sum = 0;
@@ -280,8 +270,6 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
         sum += lum[row + Math.min(W - 1, x + R + 1)] - lum[row + Math.max(0, x - R)];
       }
     }
-
-    // Vertical pass
     const bg = new Float32Array(N);
     for (let x = 0; x < W; x++) {
       let sum = 0;
@@ -292,14 +280,34 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
       }
     }
 
-    // Divide each channel by luminance background, scale to 230
+    // Step 1: normalise + contrast curve → Float32 buffer for sharpening
+    const norm = new Float32Array(N * 3);
     for (let i = 0; i < N; i++) {
       const bgVal = Math.max(12, bg[i]);
       const scale = 230 / bgVal;
       const j = i * 4;
-      d[j]     = Math.min(255, Math.max(0, Math.round(d[j]     * scale)));
-      d[j + 1] = Math.min(255, Math.max(0, Math.round(d[j + 1] * scale)));
-      d[j + 2] = Math.min(255, Math.max(0, Math.round(d[j + 2] * scale)));
+      for (let c = 0; c < 3; c++) {
+        norm[i * 3 + c] = Math.min(255, Math.max(0, d[j + c] * scale * 1.1 - 12));
+      }
+    }
+
+    // Step 2: 5-tap unsharp mask (no extra blur pass needed)
+    // blur5 = (center + N + S + E + W) / 5
+    // sharpened = center + 0.8 × (center − blur5)
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        const j = i * 4;
+        for (let c = 0; c < 3; c++) {
+          const center = norm[i * 3 + c];
+          const n_ = y > 0     ? norm[(i - W) * 3 + c] : center;
+          const s_ = y < H - 1 ? norm[(i + W) * 3 + c] : center;
+          const e_ = x < W - 1 ? norm[(i + 1) * 3 + c] : center;
+          const w_ = x > 0     ? norm[(i - 1) * 3 + c] : center;
+          const blur5 = (center + n_ + s_ + e_ + w_) / 5;
+          d[j + c] = Math.min(255, Math.max(0, Math.round(center + 0.8 * (center - blur5))));
+        }
+      }
     }
 
     ctx.putImageData(img, 0, 0);
