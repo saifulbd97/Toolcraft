@@ -23,7 +23,7 @@ router.post("/auth/register", (req, res) => {
 
   try {
     const user = db.createUser(email, password, name, referralCode);
-    (req.session as Record<string, unknown>)["localUserId"] = user.id;
+    req.session.localUserId = user.id;
     res.json({ user });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Registration failed";
@@ -45,12 +45,12 @@ router.post("/auth/login", (req, res) => {
     return;
   }
 
-  (req.session as Record<string, unknown>)["localUserId"] = user.id;
+  req.session.localUserId = user.id;
   res.json({ user });
 });
 
 router.get("/user/me", (req, res) => {
-  const userId = (req.session as Record<string, unknown>)["localUserId"] as string | undefined;
+  const userId = req.session.localUserId;
   if (!userId) {
     res.status(401).json({ error: "Not logged in" });
     return;
