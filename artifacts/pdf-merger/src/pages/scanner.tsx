@@ -183,7 +183,46 @@ function warpImage(src: HTMLCanvasElement, corners: Corners): HTMLCanvasElement 
   return warpWithCV(src, corners) ?? warpPure(src, corners);
 }
 
-// ─── Auto document corner detection (OpenCV) ──────────────────────────────────
+// ─── External API corner detection ────────────────────────────────────────────
+async function detectCornersViaApi(
+  canvas: HTMLCanvasElement, w: number, h: number
+): Promise<Corners | null> {
+  try {
+    const MAX = 800;
+    const scale = Math.min(1, MAX / Math.max(canvas.width, canvas.height));
+    const tw = Math.round(canvas.width * scale);
+    const th = Math.round(canvas.height * scale);
+    const thumb = document.createElement("canvas");
+    thumb.width = tw; thumb.height = th;
+    thumb.getContext("2d")!.drawImage(canvas, 0, 0, tw, th);
+    const b64 = thumb.toDataURL("image/jpeg", 0.85).split(",")[1];
+
+    const res = await fetch("/api/detect-corners", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: b64 }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as {
+      corners: null | {
+        tl: { x: number; y: number };
+        tr: { x: number; y: number };
+        br: { x: number; y: number };
+        bl: { x: number; y: number };
+      };
+    };
+    if (!data.corners) return null;
+    const { tl, tr, br, bl } = data.corners;
+    return [
+      { x: tl.x * w, y: tl.y * h },
+      { x: tr.x * w, y: tr.y * h },
+      { x: br.x * w, y: br.y * h },
+      { x: bl.x * w, y: bl.y * h },
+    ];
+  } catch { return null; }
+}
+
+// ─── Auto document corner detection (OpenCV fallback) ─────────────────────────
 function sortCorners(pts: Pt[]): Corners {
   const sorted = [...pts].sort((a, b) => (a.x + a.y) - (b.x + b.y));
   const tl = sorted[0], br = sorted[3];
@@ -467,6 +506,7 @@ export default function Scanner() {
   // Synchronous drag tracking (React state is async — ref ensures first pointermove isn't lost)
   const draggingRef = useRef<number | null>(null);
   const [zoomPos, setZoomPos] = useState<{ cx: number; cy: number; wL: number; wT: number; wW: number; wH: number } | null>(null);
+  const [detecting, setDetecting] = useState(false);
 
   // Load OpenCV silently in the background (for warp + enhance only)
   useEffect(() => { loadOpenCV(); }, []);
@@ -548,12 +588,26 @@ export default function Scanner() {
     c.width = v.videoWidth; c.height = v.videoHeight;
     c.getContext("2d")!.drawImage(v, 0, 0);
     stopCam();
-    // Attempt auto-detection (skipped for ID/QR which have fixed shapes)
-    const auto = (scannerMode === "document" || scannerMode === "receipt")
-      ? detectDocumentCorners(c) : null;
-    setCorners(auto ?? modeDefaultCorners(c.width, c.height, scannerMode));
+
+    // Show captured phase immediately with safe default corners
+    const defaults = modeDefaultCorners(c.width, c.height, scannerMode);
+    setCorners(defaults);
     setCaptured(c);
     setPhase("captured");
+
+    // For document/receipt: run AI detection in background, update corners when done
+    if (scannerMode === "document" || scannerMode === "receipt") {
+      setDetecting(true);
+      detectCornersViaApi(c, c.width, c.height).then(apiCorners => {
+        // Fall back to OpenCV if API returned nothing
+        const best = apiCorners ?? detectDocumentCorners(c);
+        if (best) setCorners(best);
+      }).catch(() => {
+        // Try local OpenCV as last resort
+        const cv = detectDocumentCorners(c);
+        if (cv) setCorners(cv);
+      }).finally(() => setDetecting(false));
+    }
   }, [stopCam, scannerMode]);
 
   const process = useCallback(async (overrideMode?: EnhanceMode) => {
@@ -625,11 +679,23 @@ export default function Scanner() {
       c.width = img.naturalWidth; c.height = img.naturalHeight;
       c.getContext("2d")!.drawImage(img, 0, 0);
       URL.revokeObjectURL(url);
-      const auto = (scannerMode === "document" || scannerMode === "receipt")
-        ? detectDocumentCorners(c) : null;
-      setCorners(auto ?? modeDefaultCorners(c.width, c.height, scannerMode));
+
+      // Show captured phase immediately with defaults
+      setCorners(modeDefaultCorners(c.width, c.height, scannerMode));
       setCaptured(c);
       setPhase("captured");
+
+      // Background AI detection for document/receipt
+      if (scannerMode === "document" || scannerMode === "receipt") {
+        setDetecting(true);
+        detectCornersViaApi(c, c.width, c.height).then(apiCorners => {
+          const best = apiCorners ?? detectDocumentCorners(c);
+          if (best) setCorners(best);
+        }).catch(() => {
+          const cv = detectDocumentCorners(c);
+          if (cv) setCorners(cv);
+        }).finally(() => setDetecting(false));
+      }
     };
     img.onerror = () => { URL.revokeObjectURL(url); setErr("Could not load image. Please try another file."); };
     img.src = url;
@@ -910,6 +976,14 @@ export default function Scanner() {
                 return <line key={i} x1={c.x} y1={c.y} x2={next.x} y2={next.y} stroke="#2563eb" strokeWidth={Math.max(2, captured.width * 0.003)} strokeLinecap="round" />;
               })}
             </svg>
+
+            {/* AI detecting banner — shown while API call is in flight */}
+            {detecting && (
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 bg-black/70 backdrop-blur-sm text-white text-xs font-medium px-3 py-1.5 rounded-full shadow-lg pointer-events-none">
+                <Loader2 className="w-3 h-3 animate-spin text-blue-400" />
+                Detecting corners…
+              </div>
+            )}
 
             {/* Corner handle dots — larger for easy touch */}
             {corners.map((c, i) => (
