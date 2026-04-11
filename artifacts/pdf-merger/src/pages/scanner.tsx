@@ -11,14 +11,14 @@ import { Button } from "@/components/ui/button";
 interface Pt { x: number; y: number }
 type Corners = [Pt, Pt, Pt, Pt];
 type Phase = "loading" | "idle" | "scanning" | "captured" | "result";
-type EnhanceMode = "bw" | "grayscale" | "color";
+type EnhanceMode = "original" | "clean" | "strong_bw";
 type ScannerMode = "document" | "id" | "receipt" | "qr";
 
 const MODE_META: Record<ScannerMode, { label: string; defaultEnhance: EnhanceMode; hint: string }> = {
-  document: { label: "Document Scan",  defaultEnhance: "bw",        hint: "Point at a document — edges highlight automatically" },
-  id:       { label: "ID Card",        defaultEnhance: "color",     hint: "Align your ID card with the yellow guide" },
-  receipt:  { label: "Receipt",        defaultEnhance: "grayscale", hint: "Hold the receipt upright within the guide" },
-  qr:       { label: "QR Code",        defaultEnhance: "color",     hint: "Point camera at a QR code to scan instantly" },
+  document: { label: "Document Scan",  defaultEnhance: "clean",      hint: "Point at a document — edges highlight automatically" },
+  id:       { label: "ID Card",        defaultEnhance: "original",   hint: "Align your ID card with the yellow guide" },
+  receipt:  { label: "Receipt",        defaultEnhance: "clean",      hint: "Hold the receipt upright within the guide" },
+  qr:       { label: "QR Code",        defaultEnhance: "original",   hint: "Point camera at a QR code to scan instantly" },
 };
 
 function modeDefaultCorners(w: number, h: number, mode: ScannerMode): Corners {
@@ -76,12 +76,35 @@ function loadOpenCV(): Promise<boolean> {
 
 // ─── Geometry helpers ─────────────────────────────────────────────────────────
 function sortCorners(pts: Pt[]): Corners {
-  const c = { x: pts.reduce((s, p) => s + p.x, 0) / 4, y: pts.reduce((s, p) => s + p.y, 0) / 4 };
-  const tl = pts.find(p => p.x < c.x && p.y < c.y) ?? pts[0];
-  const tr = pts.find(p => p.x >= c.x && p.y < c.y) ?? pts[1];
-  const br = pts.find(p => p.x >= c.x && p.y >= c.y) ?? pts[2];
-  const bl = pts.find(p => p.x < c.x && p.y >= c.y) ?? pts[3];
+  const cx = pts.reduce((s, p) => s + p.x, 0) / 4;
+  const cy = pts.reduce((s, p) => s + p.y, 0) / 4;
+  // Sort by angle from centroid (counter-clockwise from top-left)
+  const angled = pts.map(p => ({ ...p, a: Math.atan2(p.y - cy, p.x - cx) }));
+  angled.sort((a, b) => a.a - b.a);
+  // Rotate so top-left (smallest x+y sum) comes first
+  let minSum = Infinity, minIdx = 0;
+  for (let i = 0; i < 4; i++) {
+    const s = angled[i].x + angled[i].y;
+    if (s < minSum) { minSum = s; minIdx = i; }
+  }
+  const rotated = [...angled.slice(minIdx), ...angled.slice(0, minIdx)];
+  // Order: TL, BL, BR, TR (counter-clockwise) → remap to TL, TR, BR, BL
+  const [tl, bl, br, tr] = rotated;
   return [tl, tr, br, bl];
+}
+
+function isConvex(pts: Pt[]): boolean {
+  const n = pts.length;
+  let sign = 0;
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n], c = pts[(i + 2) % n];
+    const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if (cross !== 0) {
+      if (sign === 0) sign = cross > 0 ? 1 : -1;
+      else if ((cross > 0 ? 1 : -1) !== sign) return false;
+    }
+  }
+  return true;
 }
 
 function defaultCorners(w: number, h: number): Corners {
@@ -93,63 +116,142 @@ function defaultCorners(w: number, h: number): Corners {
 function detectCorners(canvas: HTMLCanvasElement): Corners | null {
   const cv = (window as any).cv;
   if (!cv?.Mat) return null;
+
+  const mats: any[] = [];
+  const track = <T,>(m: T): T => { mats.push(m); return m; };
+
   try {
-    const src = cv.imread(canvas);
-    const gray = new cv.Mat(); const blur = new cv.Mat();
-    const edges = new cv.Mat(); const dilated = new cv.Mat();
-    const contours = new cv.MatVector(); const hier = new cv.Mat();
+    const src = track(cv.imread(canvas));
+    const gray = track(new cv.Mat());
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
-    cv.Canny(blur, edges, 50, 150);
-    const k = cv.Mat.ones(3, 3, cv.CV_8U);
-    cv.dilate(edges, dilated, k);
-    cv.findContours(dilated, contours, hier, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
-    const minArea = canvas.width * canvas.height * 0.05;
-    let best: Corners | null = null; let maxA = 0;
-    for (let i = 0; i < contours.size(); i++) {
-      const cnt = contours.get(i);
-      const area = cv.contourArea(cnt);
-      if (area > minArea) {
-        const peri = cv.arcLength(cnt, true);
-        const approx = new cv.Mat();
-        cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-        if (approx.rows === 4 && area > maxA) {
-          maxA = area;
-          const d = approx.data32S;
-          best = sortCorners([
-            { x: d[0], y: d[1] }, { x: d[2], y: d[3] },
-            { x: d[4], y: d[5] }, { x: d[6], y: d[7] },
-          ]);
-        }
-        approx.delete();
-      }
-      cnt.delete();
+
+    // Reduce noise with bilateral filter (preserves edges better than Gaussian)
+    let preEdge: any;
+    try {
+      const filtered = track(new cv.Mat());
+      cv.bilateralFilter(gray, filtered, 9, 75, 75, cv.BORDER_DEFAULT);
+      // CLAHE for better local contrast (optional — not all OpenCV.js builds have it)
+      const clahe = track(new cv.CLAHE(2.0, new cv.Size(8, 8)));
+      const enhanced = track(new cv.Mat());
+      clahe.apply(filtered, enhanced);
+      preEdge = enhanced;
+    } catch {
+      // Fallback: just Gaussian blur on grayscale
+      const fallback = track(new cv.Mat());
+      cv.GaussianBlur(gray, fallback, new cv.Size(7, 7), 0);
+      preEdge = fallback;
     }
-    src.delete(); gray.delete(); blur.delete(); edges.delete();
-    dilated.delete(); k.delete(); contours.delete(); hier.delete();
+
+    // Multi-pass edge detection: try multiple Canny thresholds (aggressive → conservative)
+    const thresholdSets = [[30, 100], [50, 150], [75, 200]];
+    const imgArea = canvas.width * canvas.height;
+    const minArea = imgArea * 0.04;
+    const maxArea = imgArea * 0.98;
+
+    let best: Corners | null = null;
+    let maxA = 0;
+
+    for (const [lo, hi] of thresholdSets) {
+      const blurred = track(new cv.Mat());
+      cv.GaussianBlur(preEdge, blurred, new cv.Size(5, 5), 0);
+
+      const edges = track(new cv.Mat());
+      cv.Canny(blurred, edges, lo, hi);
+
+      // Morphological close to connect broken edges
+      const kernel = track(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5)));
+      const closed = track(new cv.Mat());
+      cv.morphologyEx(edges, closed, cv.MORPH_CLOSE, kernel);
+
+      // Dilate to thicken edges
+      const k2 = track(cv.Mat.ones(3, 3, cv.CV_8U));
+      const dilated = track(new cv.Mat());
+      cv.dilate(closed, dilated, k2);
+
+      const contours = track(new cv.MatVector());
+      const hier = track(new cv.Mat());
+      cv.findContours(dilated, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+      for (let i = 0; i < contours.size(); i++) {
+        const cnt = contours.get(i);
+        const area = cv.contourArea(cnt);
+        if (area < minArea || area > maxArea || area <= maxA) { cnt.delete(); continue; }
+
+        const peri = cv.arcLength(cnt, true);
+        // Try multiple approximation tolerances
+        for (const tol of [0.015, 0.02, 0.03, 0.04]) {
+          const approx = new cv.Mat();
+          cv.approxPolyDP(cnt, approx, tol * peri, true);
+          if (approx.rows === 4) {
+            const d = approx.data32S;
+            const pts: Pt[] = [
+              { x: d[0], y: d[1] }, { x: d[2], y: d[3] },
+              { x: d[4], y: d[5] }, { x: d[6], y: d[7] },
+            ];
+            // Only accept convex quadrilaterals
+            if (isConvex(pts) && area > maxA) {
+              maxA = area;
+              best = sortCorners(pts);
+            }
+          }
+          approx.delete();
+          if (best && maxA === area) break;
+        }
+        cnt.delete();
+      }
+      // If we found a large enough contour, stop trying more thresholds
+      if (best && maxA > imgArea * 0.15) break;
+    }
+
     return best;
-  } catch { return null; }
+  } catch {
+    return null;
+  } finally {
+    for (const m of mats) { try { m.delete(); } catch {} }
+  }
 }
 
 // ─── Perspective warp ─────────────────────────────────────────────────────────
 function warpWithCV(src: HTMLCanvasElement, c: Corners): HTMLCanvasElement | null {
   const cv = (window as any).cv;
   if (!cv?.Mat) return null;
+  const mats: any[] = [];
+  const track = <T,>(m: T): T => { mats.push(m); return m; };
   try {
-    const w = Math.max(Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y), Math.hypot(c[2].x - c[3].x, c[2].y - c[3].y));
-    const h = Math.max(Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y), Math.hypot(c[2].x - c[1].x, c[2].y - c[1].y));
-    const outW = Math.round(w); const outH = Math.round(h);
-    const mat = cv.imread(src);
-    const dst = new cv.Mat();
-    const sp = cv.matFromArray(4, 1, cv.CV_32FC2, [c[0].x, c[0].y, c[1].x, c[1].y, c[2].x, c[2].y, c[3].x, c[3].y]);
-    const dp = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, outW, 0, outW, outH, 0, outH]);
-    const M = cv.getPerspectiveTransform(sp, dp);
-    cv.warpPerspective(mat, dst, M, new cv.Size(outW, outH), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+    const topW = Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y);
+    const botW = Math.hypot(c[2].x - c[3].x, c[2].y - c[3].y);
+    const leftH = Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y);
+    const rightH = Math.hypot(c[2].x - c[1].x, c[2].y - c[1].y);
+    const outW = Math.round(Math.max(topW, botW));
+    const outH = Math.round(Math.max(leftH, rightH));
+
+    // Dynamic inward margin: proportional to shortest edge, clamped to image bounds
+    const minEdge = Math.min(topW, botW, leftH, rightH);
+    const margin = Math.min(3, minEdge * 0.02);
+    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+    const W = src.width - 1, H = src.height - 1;
+    const inset: Corners = [
+      { x: clamp(c[0].x + margin, 0, W), y: clamp(c[0].y + margin, 0, H) },
+      { x: clamp(c[1].x - margin, 0, W), y: clamp(c[1].y + margin, 0, H) },
+      { x: clamp(c[2].x - margin, 0, W), y: clamp(c[2].y - margin, 0, H) },
+      { x: clamp(c[3].x + margin, 0, W), y: clamp(c[3].y - margin, 0, H) },
+    ];
+
+    const mat = track(cv.imread(src));
+    const dst = track(new cv.Mat());
+    const sp = track(cv.matFromArray(4, 1, cv.CV_32FC2, [
+      inset[0].x, inset[0].y, inset[1].x, inset[1].y,
+      inset[2].x, inset[2].y, inset[3].x, inset[3].y,
+    ]));
+    const dp = track(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, outW, 0, outW, outH, 0, outH]));
+    const M = track(cv.getPerspectiveTransform(sp, dp));
+    cv.warpPerspective(mat, dst, M, new cv.Size(outW, outH), cv.INTER_CUBIC, cv.BORDER_REPLICATE, new cv.Scalar());
+
     const out = document.createElement("canvas"); out.width = outW; out.height = outH;
     cv.imshow(out, dst);
-    mat.delete(); dst.delete(); sp.delete(); dp.delete(); M.delete();
     return out;
   } catch { return null; }
+  finally { for (const m of mats) { try { m.delete(); } catch {} } }
 }
 
 // Gaussian elimination for 8×8 system
@@ -230,37 +332,116 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
   const cv = (window as any).cv;
   const out = document.createElement("canvas"); out.width = src.width; out.height = src.height;
   const ctx = out.getContext("2d")!;
-  // Try OpenCV adaptive threshold for crisp B&W
-  if (mode === "bw" && cv?.Mat) {
+  const mats: any[] = [];
+  const t = <T,>(m: T): T => { mats.push(m); return m; };
+  const cleanup = () => { for (const m of mats) { try { m.delete(); } catch {} } };
+
+  // ── Original: light contrast boost, keep colors natural ──
+  if (mode === "original") {
+    if (cv?.Mat) {
+      try {
+        const mat = t(cv.imread(src));
+        const rgb = t(new cv.Mat());
+        cv.cvtColor(mat, rgb, cv.COLOR_RGBA2RGB);
+        const labImg = t(new cv.Mat());
+        cv.cvtColor(rgb, labImg, cv.COLOR_RGB2Lab);
+        const channels = t(new cv.MatVector());
+        cv.split(labImg, channels);
+        const clahe = t(new cv.CLAHE(1.5, new cv.Size(8, 8)));
+        const enh = t(new cv.Mat());
+        clahe.apply(channels.get(0), enh);
+        channels.set(0, enh);
+        const merged = t(new cv.Mat());
+        cv.merge(channels, merged);
+        const rgb2 = t(new cv.Mat());
+        cv.cvtColor(merged, rgb2, cv.COLOR_Lab2RGB);
+        const rgba = t(new cv.Mat());
+        cv.cvtColor(rgb2, rgba, cv.COLOR_RGB2RGBA);
+        cv.imshow(out, rgba);
+        cleanup();
+        return out;
+      } catch { cleanup(); }
+    }
+    ctx.drawImage(src, 0, 0);
+    const img = ctx.getImageData(0, 0, out.width, out.height);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i]     = Math.min(255, Math.max(0, (d[i]     - 128) * 1.15 + 133));
+      d[i + 1] = Math.min(255, Math.max(0, (d[i + 1] - 128) * 1.15 + 133));
+      d[i + 2] = Math.min(255, Math.max(0, (d[i + 2] - 128) * 1.15 + 133));
+    }
+    ctx.putImageData(img, 0, 0);
+    return out;
+  }
+
+  // ── Clean: adaptive threshold — crisp text, no over-thresholding ──
+  if (mode === "clean") {
+    if (cv?.Mat) {
+      try {
+        const mat = t(cv.imread(src));
+        const gray = t(new cv.Mat());
+        cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
+        const denoised = t(new cv.Mat());
+        cv.GaussianBlur(gray, denoised, new cv.Size(3, 3), 0);
+        const clahe = t(new cv.CLAHE(2.0, new cv.Size(8, 8)));
+        const enh = t(new cv.Mat());
+        clahe.apply(denoised, enh);
+        const thr = t(new cv.Mat());
+        cv.adaptiveThreshold(enh, thr, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 31, 15);
+        const k = t(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2, 2)));
+        const cleaned = t(new cv.Mat());
+        cv.morphologyEx(thr, cleaned, cv.MORPH_OPEN, k);
+        const rgba = t(new cv.Mat());
+        cv.cvtColor(cleaned, rgba, cv.COLOR_GRAY2RGBA);
+        cv.imshow(out, rgba);
+        cleanup();
+        return out;
+      } catch { cleanup(); }
+    }
+    ctx.drawImage(src, 0, 0);
+    const img = ctx.getImageData(0, 0, out.width, out.height);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      let g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      g = Math.min(255, Math.max(0, (g - 128) * 1.4 + 140));
+      d[i] = d[i + 1] = d[i + 2] = g;
+    }
+    ctx.putImageData(img, 0, 0);
+    return out;
+  }
+
+  // ── Strong B&W: aggressive threshold for max contrast scanned look ──
+  if (cv?.Mat) {
     try {
-      const mat = cv.imread(src); const gray = new cv.Mat(); const thr = new cv.Mat(); const rgba = new cv.Mat();
+      const mat = t(cv.imread(src));
+      const gray = t(new cv.Mat());
       cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
-      cv.adaptiveThreshold(gray, thr, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 21, 10);
-      cv.cvtColor(thr, rgba, cv.COLOR_GRAY2RGBA);
+      const denoised = t(new cv.Mat());
+      cv.GaussianBlur(gray, denoised, new cv.Size(5, 5), 0);
+      const clahe = t(new cv.CLAHE(3.0, new cv.Size(8, 8)));
+      const enh = t(new cv.Mat());
+      clahe.apply(denoised, enh);
+      const thr = t(new cv.Mat());
+      cv.adaptiveThreshold(enh, thr, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 21, 10);
+      const k = t(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(2, 2)));
+      const step1 = t(new cv.Mat());
+      cv.morphologyEx(thr, step1, cv.MORPH_CLOSE, k);
+      const step2 = t(new cv.Mat());
+      cv.morphologyEx(step1, step2, cv.MORPH_OPEN, k);
+      const rgba = t(new cv.Mat());
+      cv.cvtColor(step2, rgba, cv.COLOR_GRAY2RGBA);
       cv.imshow(out, rgba);
-      mat.delete(); gray.delete(); thr.delete(); rgba.delete();
+      cleanup();
       return out;
-    } catch { /* fall through */ }
+    } catch { cleanup(); }
   }
   ctx.drawImage(src, 0, 0);
-  const img = ctx.getImageData(0, 0, out.width, out.height); const d = img.data;
-  if (mode === "bw") {
-    for (let i = 0; i < d.length; i += 4) {
-      const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      const v = g > 128 ? 255 : 0;
-      d[i] = d[i + 1] = d[i + 2] = v;
-    }
-  } else if (mode === "grayscale") {
-    for (let i = 0; i < d.length; i += 4) {
-      const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      d[i] = d[i + 1] = d[i + 2] = Math.min(255, g * 1.1);
-    }
-  } else {
-    for (let i = 0; i < d.length; i += 4) {
-      d[i]     = Math.min(255, Math.max(0, (d[i]     - 128) * 1.3 + 140));
-      d[i + 1] = Math.min(255, Math.max(0, (d[i + 1] - 128) * 1.3 + 140));
-      d[i + 2] = Math.min(255, Math.max(0, (d[i + 2] - 128) * 1.3 + 140));
-    }
+  const img = ctx.getImageData(0, 0, out.width, out.height);
+  const d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    const v = g > 120 ? 255 : 0;
+    d[i] = d[i + 1] = d[i + 2] = v;
   }
   ctx.putImageData(img, 0, 0);
   return out;
@@ -541,12 +722,12 @@ export default function Scanner() {
 
   const ModeBar = ({ onChange }: { onChange: (m: EnhanceMode) => void }) => (
     <div className="flex gap-2 justify-center">
-      {(["bw", "grayscale", "color"] as const).map(m => (
+      {(["original", "clean", "strong_bw"] as const).map(m => (
         <button key={m} onClick={() => onChange(m)}
           className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
             mode === m ? "bg-indigo-600 text-white shadow" : "bg-muted text-muted-foreground hover:bg-accent"
           }`}>
-          {{ bw: "B&W Scan", grayscale: "Grayscale", color: "Color" }[m]}
+          {{ original: "Original", clean: "Clean", strong_bw: "Strong B&W" }[m]}
         </button>
       ))}
     </div>
