@@ -1,4 +1,4 @@
-import { Switch, Route, Router as WouterRouter } from "wouter";
+import { Switch, Route, Router as WouterRouter, Link } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -14,6 +14,23 @@ import Split from "@/pages/split";
 import Compress from "@/pages/compress";
 
 const queryClient = new QueryClient();
+
+function Navbar() {
+  const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+  return (
+    <nav className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-4 h-14 bg-white/90 backdrop-blur border-b border-border">
+      <Link href="/">
+        <img
+          src={`${base}/logo.png`}
+          alt="Toolcraft"
+          width={100}
+          className="h-auto cursor-pointer"
+        />
+      </Link>
+      <LanguageToggle />
+    </nav>
+  );
+}
 
 function Router() {
   return (
@@ -36,10 +53,10 @@ function App() {
       <TooltipProvider>
         <LanguageProvider>
           <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-            <div className="fixed top-3 right-3 z-50">
-              <LanguageToggle />
+            <Navbar />
+            <div className="pt-14">
+              <Router />
             </div>
-            <Router />
           </WouterRouter>
           <Toaster />
         </LanguageProvider>
