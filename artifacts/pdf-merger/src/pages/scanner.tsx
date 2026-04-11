@@ -183,6 +183,78 @@ function warpImage(src: HTMLCanvasElement, corners: Corners): HTMLCanvasElement 
   return warpWithCV(src, corners) ?? warpPure(src, corners);
 }
 
+// ─── Auto document corner detection (OpenCV) ──────────────────────────────────
+function sortCorners(pts: Pt[]): Corners {
+  const sorted = [...pts].sort((a, b) => (a.x + a.y) - (b.x + b.y));
+  const tl = sorted[0], br = sorted[3];
+  const mid = [sorted[1], sorted[2]].sort((a, b) => (a.x - a.y) - (b.x - b.y));
+  return [tl, mid[1], br, mid[0]]; // TL, TR, BR, BL
+}
+
+function detectDocumentCorners(canvas: HTMLCanvasElement): Corners | null {
+  const cv = (window as any).cv;
+  if (!cv?.Mat) return null;
+  const mats: any[] = [];
+  const t = <T,>(m: T): T => { mats.push(m); return m; };
+  const cleanup = () => { for (const m of mats) { try { m.delete(); } catch {} } };
+  try {
+    const src = t(cv.imread(canvas));
+    const gray = t(new cv.Mat());
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+    // Blur → reduce noise before edge detection
+    const blurred = t(new cv.Mat());
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+
+    // Canny edges
+    const edges = t(new cv.Mat());
+    cv.Canny(blurred, edges, 30, 90);
+
+    // Dilate to connect broken edges
+    const kernel = t(cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3)));
+    const dilated = t(new cv.Mat());
+    cv.dilate(edges, dilated, kernel);
+
+    // Find external contours
+    const contours = t(new cv.MatVector());
+    const hierarchy = t(new cv.Mat());
+    cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    const minArea = canvas.width * canvas.height * 0.08; // at least 8% of frame
+    let maxArea = 0;
+    let best: Corners | null = null;
+
+    for (let i = 0; i < contours.size(); i++) {
+      const contour = contours.get(i);
+      const area = cv.contourArea(contour);
+      if (area < minArea) continue;
+
+      const peri = cv.arcLength(contour, true);
+      const approx = t(new cv.Mat());
+      cv.approxPolyDP(contour, approx, 0.02 * peri, true);
+
+      if (approx.rows === 4 && area > maxArea) {
+        maxArea = area;
+        const pts: Pt[] = [];
+        for (let j = 0; j < 4; j++) {
+          pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+        }
+        // Inset 4px to avoid including the border shadow
+        const sorted = sortCorners(pts);
+        const cx = sorted.reduce((s, p) => s + p.x, 0) / 4;
+        const cy = sorted.reduce((s, p) => s + p.y, 0) / 4;
+        const INSET = 4;
+        best = sorted.map(p => ({
+          x: Math.round(p.x + (cx - p.x > 0 ? INSET : -INSET)),
+          y: Math.round(p.y + (cy - p.y > 0 ? INSET : -INSET)),
+        })) as Corners;
+      }
+    }
+    cleanup();
+    return best;
+  } catch { cleanup(); return null; }
+}
+
 // ─── Image enhancement ────────────────────────────────────────────────────────
 function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
   const cv = (window as any).cv;
@@ -392,6 +464,9 @@ export default function Scanner() {
   const streamRef = useRef<MediaStream | null>(null);
   const qrTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
+  // Synchronous drag tracking (React state is async — ref ensures first pointermove isn't lost)
+  const draggingRef = useRef<number | null>(null);
+  const [zoomPos, setZoomPos] = useState<{ cx: number; cy: number; wL: number; wT: number; wW: number; wH: number } | null>(null);
 
   // Load OpenCV silently in the background (for warp + enhance only)
   useEffect(() => { loadOpenCV(); }, []);
@@ -473,8 +548,10 @@ export default function Scanner() {
     c.width = v.videoWidth; c.height = v.videoHeight;
     c.getContext("2d")!.drawImage(v, 0, 0);
     stopCam();
-    // Always use mode-appropriate default corners — user will adjust manually
-    setCorners(modeDefaultCorners(c.width, c.height, scannerMode));
+    // Attempt auto-detection (skipped for ID/QR which have fixed shapes)
+    const auto = (scannerMode === "document" || scannerMode === "receipt")
+      ? detectDocumentCorners(c) : null;
+    setCorners(auto ?? modeDefaultCorners(c.width, c.height, scannerMode));
     setCaptured(c);
     setPhase("captured");
   }, [stopCam, scannerMode]);
@@ -548,7 +625,9 @@ export default function Scanner() {
       c.width = img.naturalWidth; c.height = img.naturalHeight;
       c.getContext("2d")!.drawImage(img, 0, 0);
       URL.revokeObjectURL(url);
-      setCorners(modeDefaultCorners(c.width, c.height, scannerMode));
+      const auto = (scannerMode === "document" || scannerMode === "receipt")
+        ? detectDocumentCorners(c) : null;
+      setCorners(auto ?? modeDefaultCorners(c.width, c.height, scannerMode));
       setCaptured(c);
       setPhase("captured");
     };
@@ -567,14 +646,16 @@ export default function Scanner() {
     setFacing(next); startCam(next);
   }, [facing, startCam]);
 
-  // Corner dragging
+  // Corner dragging — uses a ref so the first pointermove after pointerdown is never lost
   const onPtrDown = (e: React.PointerEvent, idx: number) => {
     e.preventDefault();
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    draggingRef.current = idx;
     setDragging(idx);
   };
   const onPtrMove = (e: React.PointerEvent) => {
-    if (dragging === null || !corners || !wrapRef.current || !captured) return;
+    const idx = draggingRef.current;
+    if (idx === null || !corners || !wrapRef.current || !captured) return;
     const r = wrapRef.current.getBoundingClientRect();
     const rawX = ((e.clientX - r.left) / r.width)  * captured.width;
     const rawY = ((e.clientY - r.top)  / r.height) * captured.height;
@@ -583,40 +664,34 @@ export default function Scanner() {
       y: Math.max(0, Math.min(captured.height, rawY)),
     };
 
-    if (scannerMode === "id") {
-      // Locked-ratio resize: opposite corner (idx XOR 2) stays fixed
-      // corners always stored as [TL, TR, BR, BL] in ID mode
-      const oppIdx = dragging ^ 2;          // 0↔2, 1↔3
-      const opp = corners[oppIdx];
+    // Track screen position + wrap rect for zoom magnifier
+    setZoomPos({ cx: e.clientX, cy: e.clientY, wL: r.left, wT: r.top, wW: r.width, wH: r.height });
 
-      // Raw deltas from opposite corner to dragged point
+    if (scannerMode === "id") {
+      const oppIdx = idx ^ 2;
+      const opp = corners[oppIdx];
       let dx = Math.abs(pt.x - opp.x);
       let dy = Math.abs(pt.y - opp.y);
-
-      // Enforce ID_RATIO: expand whichever axis is too small
-      if (dx / Math.max(dy, 0.001) > ID_RATIO) {
-        dy = dx / ID_RATIO;
-      } else {
-        dx = dy * ID_RATIO;
-      }
-
-      // Direction signs based on which side the drag went
+      if (dx / Math.max(dy, 0.001) > ID_RATIO) { dy = dx / ID_RATIO; } else { dx = dy * ID_RATIO; }
       const sx = pt.x >= opp.x ? 1 : -1;
       const sy = pt.y >= opp.y ? 1 : -1;
-
-      // New dragged corner position (clamped)
       const nx = Math.max(0, Math.min(captured.width,  opp.x + sx * dx));
       const ny = Math.max(0, Math.min(captured.height, opp.y + sy * dy));
-
-      // Rebuild all 4 corners as a clean rectangle
       const x0 = Math.min(opp.x, nx), y0 = Math.min(opp.y, ny);
       const x1 = Math.max(opp.x, nx), y1 = Math.max(opp.y, ny);
       setCorners(idCornersFromBox(x0, y0, x1, y1));
     } else {
-      const nc = [...corners] as Corners; nc[dragging] = pt; setCorners(nc);
+      // Each corner moves independently
+      const nc = [...corners] as Corners;
+      nc[idx] = pt;
+      setCorners(nc);
     }
   };
-  const onPtrUp = () => setDragging(null);
+  const onPtrUp = () => {
+    draggingRef.current = null;
+    setDragging(null);
+    setZoomPos(null);
+  };
 
   const EnhanceModeBar = ({ onChange }: { onChange: (m: EnhanceMode) => void }) => (
     <div className="flex gap-2 justify-center flex-wrap">
@@ -814,47 +889,43 @@ export default function Scanner() {
               viewBox={`0 0 ${captured.width} ${captured.height}`}
               preserveAspectRatio="none"
             >
-              {/* Semi-transparent overlay outside the quad */}
               <defs>
                 <mask id="quad-mask">
                   <rect width={captured.width} height={captured.height} fill="white" />
                   <polygon points={corners.map(c => `${c.x},${c.y}`).join(" ")} fill="black" />
                 </mask>
               </defs>
-              <rect
-                width={captured.width} height={captured.height}
-                fill="rgba(0,0,0,0.45)" mask="url(#quad-mask)"
-              />
-              {/* Crop boundary */}
+              {/* Darken area outside crop */}
+              <rect width={captured.width} height={captured.height} fill="rgba(0,0,0,0.52)" mask="url(#quad-mask)" />
+              {/* Bright blue crop boundary */}
               <polygon
                 points={corners.map(c => `${c.x},${c.y}`).join(" ")}
-                fill="rgba(99,102,241,0.12)"
-                stroke="#6366f1"
-                strokeWidth={Math.max(2, captured.width * 0.003)}
-                strokeDasharray={`${captured.width * 0.015} ${captured.width * 0.008}`}
+                fill="rgba(37,99,235,0.08)"
+                stroke="#2563eb"
+                strokeWidth={Math.max(2.5, captured.width * 0.004)}
               />
-              {/* Edge lines with corner index labels */}
+              {/* Solid blue edge lines */}
               {corners.map((c, i) => {
                 const next = corners[(i + 1) % 4];
-                return <line key={i} x1={c.x} y1={c.y} x2={next.x} y2={next.y} stroke="#6366f1" strokeWidth={Math.max(1.5, captured.width * 0.002)} />;
+                return <line key={i} x1={c.x} y1={c.y} x2={next.x} y2={next.y} stroke="#2563eb" strokeWidth={Math.max(2, captured.width * 0.003)} strokeLinecap="round" />;
               })}
             </svg>
 
-            {/* Corner handle dots */}
+            {/* Corner handle dots — larger for easy touch */}
             {corners.map((c, i) => (
               <div
                 key={i}
-                className="absolute z-10 touch-none cursor-grab active:cursor-grabbing"
+                className="absolute z-10 touch-none"
                 style={{
                   left: `${(c.x / captured.width) * 100}%`,
                   top: `${(c.y / captured.height) * 100}%`,
                   transform: "translate(-50%, -50%)",
+                  cursor: dragging === i ? "grabbing" : "grab",
                 }}
                 onPointerDown={e => onPtrDown(e, i)}
               >
-                {/* Outer ring for larger touch target */}
-                <div className="w-10 h-10 rounded-full flex items-center justify-center bg-white/20">
-                  <div className="w-6 h-6 rounded-full bg-indigo-600 border-2 border-white shadow-lg" />
+                <div className="w-12 h-12 rounded-full flex items-center justify-center bg-blue-500/20 active:bg-blue-500/30">
+                  <div className="w-7 h-7 rounded-full bg-blue-600 border-[3px] border-white shadow-xl" />
                 </div>
               </div>
             ))}
@@ -939,6 +1010,71 @@ export default function Scanner() {
           </Button>
         </div>
       )}
+
+      {/* ── ZOOM MAGNIFIER (position:fixed — floats above everything while dragging) ── */}
+      {phase === "captured" && dragging !== null && zoomPos !== null && captured && corners && (() => {
+        const ZOOM = 2.8;
+        const SIZE = 128; // magnifier diameter in px
+        const corner = corners[dragging];
+
+        // Corner position in screen coords
+        const cxScreen = zoomPos.wL + (corner.x / captured.width)  * zoomPos.wW;
+        const cyScreen = zoomPos.wT + (corner.y / captured.height) * zoomPos.wH;
+
+        // The image at ZOOM× scale
+        const imgW = zoomPos.wW * ZOOM;
+        const imgH = zoomPos.wH * ZOOM;
+
+        // Translate so the corner pixel is at magnifier center
+        const bgX = -(cxScreen - zoomPos.wL) * ZOOM + SIZE / 2;
+        const bgY = -(cyScreen - zoomPos.wT) * ZOOM + SIZE / 2;
+
+        // Position magnifier above-right of finger, flip if too close to edge
+        const OFFSET_Y = 80;
+        let mx = cxScreen - SIZE / 2;
+        let my = cyScreen - SIZE - OFFSET_Y;
+        if (my < 8) my = cyScreen + OFFSET_Y;
+        if (mx < 8) mx = 8;
+        if (mx + SIZE > window.innerWidth - 8) mx = window.innerWidth - SIZE - 8;
+
+        return (
+          <div
+            style={{
+              position: "fixed",
+              left: mx,
+              top: my,
+              width: SIZE,
+              height: SIZE,
+              borderRadius: "50%",
+              border: "3px solid #2563eb",
+              overflow: "hidden",
+              zIndex: 9999,
+              boxShadow: "0 6px 24px rgba(0,0,0,0.45)",
+              pointerEvents: "none",
+            }}
+          >
+            {/* Magnified image */}
+            <div
+              style={{
+                position: "absolute",
+                width: imgW,
+                height: imgH,
+                left: bgX,
+                top: bgY,
+                backgroundImage: `url(${captured.toDataURL()})`,
+                backgroundSize: `${imgW}px ${imgH}px`,
+                backgroundRepeat: "no-repeat",
+              }}
+            />
+            {/* Crosshair */}
+            <div style={{ position: "absolute", inset: 0 }}>
+              <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "rgba(37,99,235,0.7)", transform: "translateX(-50%)" }} />
+              <div style={{ position: "absolute", top: "50%", left: 0, right: 0, height: 1, background: "rgba(37,99,235,0.7)", transform: "translateY(-50%)" }} />
+              <div style={{ position: "absolute", left: "50%", top: "50%", transform: "translate(-50%,-50%)", width: 5, height: 5, borderRadius: "50%", background: "#2563eb" }} />
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
