@@ -252,6 +252,7 @@ export default function Scanner() {
   const [dragging, setDragging] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [camReady, setCamReady] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -271,57 +272,114 @@ export default function Scanner() {
 
   useEffect(() => () => stopCam(), [stopCam]);
 
+  // Attach stream to <video> element AFTER phase="scanning" has rendered the element
+  useEffect(() => {
+    if (phase !== "scanning") return;
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    if (!video || !stream) return;
+
+    // Set attributes imperatively (belt-and-suspenders on top of JSX attrs)
+    video.muted = true;
+    video.setAttribute("playsinline", "");
+    video.setAttribute("autoplay", "");
+    video.srcObject = stream;
+
+    const onMeta = () => {
+      console.log("[Scanner] loadedmetadata", video.videoWidth, "x", video.videoHeight);
+      video.play()
+        .then(() => {
+          console.log("[Scanner] video playing", video.videoWidth, "x", video.videoHeight);
+          setCamReady(true);
+        })
+        .catch(e => console.error("[Scanner] play() failed:", e));
+    };
+
+    // If metadata already loaded (e.g. stream reused), fire immediately
+    if (video.readyState >= 1) { onMeta(); }
+    else { video.addEventListener("loadedmetadata", onMeta, { once: true }); }
+
+    return () => video.removeEventListener("loadedmetadata", onMeta);
+  }, [phase]);
+
+  // Edge-detection loop — starts once camera is ready
+  useEffect(() => {
+    if (!camReady || !cvReady) return;
+    detectTimer.current = setInterval(() => {
+      const v = videoRef.current;
+      const ov = overlayRef.current;
+      if (!v || !ov || !v.videoWidth) return;
+      const tmp = document.createElement("canvas");
+      tmp.width = v.videoWidth; tmp.height = v.videoHeight;
+      tmp.getContext("2d")!.drawImage(v, 0, 0);
+      const pts = detectCorners(tmp);
+      const ctx = ov.getContext("2d")!;
+      ov.width = tmp.width; ov.height = tmp.height;
+      ctx.clearRect(0, 0, ov.width, ov.height);
+      if (pts) {
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        pts.forEach(p => ctx.lineTo(p.x, p.y));
+        ctx.closePath();
+        ctx.fillStyle = "rgba(34,197,94,.18)";
+        ctx.fill();
+        ctx.strokeStyle = "#22c55e";
+        ctx.lineWidth = Math.max(2, ov.width * 0.003);
+        ctx.stroke();
+        pts.forEach(p => {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, Math.max(6, ov.width * 0.012), 0, Math.PI * 2);
+          ctx.fillStyle = "#22c55e";
+          ctx.fill();
+        });
+      }
+    }, 250);
+    return () => {
+      if (detectTimer.current) { clearInterval(detectTimer.current); detectTimer.current = null; }
+    };
+  }, [camReady, cvReady]);
+
   const startCam = useCallback(async (f: "environment" | "user" = "environment") => {
     setErr(null);
+    setCamReady(false);
     stopCam();
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: f }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: false,
-      });
-      streamRef.current = stream;
-      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
-      setPhase("scanning");
-      if (cvReady) {
-        detectTimer.current = setInterval(() => {
-          const v = videoRef.current; const ov = overlayRef.current;
-          if (!v || !ov || v.readyState < 2) return;
-          const tmp = document.createElement("canvas");
-          tmp.width = v.videoWidth || 640; tmp.height = v.videoHeight || 480;
-          tmp.getContext("2d")!.drawImage(v, 0, 0, tmp.width, tmp.height);
-          const pts = detectCorners(tmp);
-          const ctx = ov.getContext("2d")!;
-          ov.width = tmp.width; ov.height = tmp.height;
-          ctx.clearRect(0, 0, ov.width, ov.height);
-          if (pts) {
-            ctx.beginPath();
-            ctx.moveTo(pts[0].x, pts[0].y);
-            pts.forEach(p => ctx.lineTo(p.x, p.y));
-            ctx.closePath();
-            ctx.fillStyle = "rgba(34,197,94,.18)";
-            ctx.fill();
-            ctx.strokeStyle = "#22c55e";
-            ctx.lineWidth = Math.max(2, ov.width * 0.003);
-            ctx.stroke();
-            pts.forEach(p => {
-              ctx.beginPath();
-              ctx.arc(p.x, p.y, Math.max(6, ov.width * 0.012), 0, Math.PI * 2);
-              ctx.fillStyle = "#22c55e";
-              ctx.fill();
-            });
-          }
-        }, 250);
+
+    // Fallback constraint chain — start strict, relax if needed
+    const profiles = [
+      { video: { facingMode: f } },
+      { video: { facingMode: { ideal: f } } },
+      { video: true },
+    ] as const;
+
+    let stream: MediaStream | null = null;
+    for (const constraints of profiles) {
+      try {
+        console.log("[Scanner] trying constraints:", JSON.stringify(constraints));
+        stream = await navigator.mediaDevices.getUserMedia({ ...constraints, audio: false });
+        console.log("[Scanner] stream obtained:", stream.getVideoTracks()[0]?.label);
+        break;
+      } catch (e: any) {
+        console.error("[Scanner] getUserMedia failed:", e.name, e.message, constraints);
+        if (e.name === "NotAllowedError") {
+          setErr("Camera permission denied. Please allow camera access in your browser settings.");
+          return;
+        }
       }
-    } catch (e: any) {
-      setErr(e.name === "NotAllowedError"
-        ? "Camera permission denied. Please allow camera access in your browser settings."
-        : "Could not start camera. Make sure your device has a camera and try again.");
     }
-  }, [cvReady, stopCam]);
+
+    if (!stream) {
+      setErr("Could not start camera. Make sure your device has a camera and try again.");
+      return;
+    }
+
+    streamRef.current = stream;
+    // Switch phase so the <video> element mounts; useEffect above will attach the stream
+    setPhase("scanning");
+  }, [stopCam]);
 
   const capture = useCallback(() => {
     const v = videoRef.current;
-    if (!v || v.readyState < 2) return;
+    if (!v || !v.videoWidth || !v.videoHeight) return;
     const c = document.createElement("canvas");
     c.width = v.videoWidth || 640; c.height = v.videoHeight || 480;
     c.getContext("2d")!.drawImage(v, 0, 0);
@@ -385,7 +443,7 @@ export default function Scanner() {
 
   const reset = useCallback(() => {
     stopCam(); setCaptured(null); setResultUrl(null); setCorners(null);
-    setErr(null); setMode("bw"); setPhase("idle");
+    setErr(null); setMode("bw"); setCamReady(false); setPhase("idle");
   }, [stopCam]);
 
   const flipCam = useCallback(() => {
@@ -471,10 +529,29 @@ export default function Scanner() {
       {phase === "scanning" && (
         <div className="flex flex-col" style={{ height: "calc(100dvh - 7rem)" }}>
           <div className="relative flex-1 bg-black overflow-hidden">
-            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-contain" />
-            <canvas ref={overlayRef} className="absolute inset-0 w-full h-full pointer-events-none" style={{ objectFit: "contain" }} />
-            {cvReady && (
-              <div className="absolute top-3 inset-x-0 flex justify-center pointer-events-none">
+            {/* Video: object-cover fills the viewport, no black bars */}
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-full object-cover"
+            />
+            {/* Canvas overlay for edge-detection highlight */}
+            <canvas
+              ref={overlayRef}
+              className="absolute inset-0 w-full h-full pointer-events-none"
+            />
+            {/* Loading spinner while camera initialises */}
+            {!camReady && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 z-10 gap-3">
+                <Loader2 className="w-8 h-8 text-white animate-spin" />
+                <p className="text-white text-sm">Starting camera…</p>
+              </div>
+            )}
+            {/* Hint banner */}
+            {camReady && cvReady && (
+              <div className="absolute top-3 inset-x-0 flex justify-center pointer-events-none z-10">
                 <span className="bg-black/60 text-white text-xs px-3 py-1.5 rounded-full backdrop-blur">
                   Point at a document — edges highlight automatically
                 </span>
@@ -482,10 +559,18 @@ export default function Scanner() {
             )}
           </div>
           <div className="flex items-center justify-between px-8 py-4 bg-zinc-900">
-            <button onClick={reset} className="p-3 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"><CameraOff className="w-5 h-5" /></button>
-            <button onClick={capture} aria-label="Capture"
-              className="w-16 h-16 rounded-full bg-white border-4 border-white/30 hover:scale-105 active:scale-95 transition-transform shadow-lg" />
-            <button onClick={flipCam} className="p-3 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"><FlipHorizontal className="w-5 h-5" /></button>
+            <button onClick={reset} className="p-3 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors">
+              <CameraOff className="w-5 h-5" />
+            </button>
+            <button
+              onClick={capture}
+              disabled={!camReady}
+              aria-label="Capture"
+              className="w-16 h-16 rounded-full bg-white border-4 border-white/30 hover:scale-105 active:scale-95 transition-transform shadow-lg disabled:opacity-40 disabled:cursor-not-allowed"
+            />
+            <button onClick={flipCam} className="p-3 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors">
+              <FlipHorizontal className="w-5 h-5" />
+            </button>
           </div>
         </div>
       )}
