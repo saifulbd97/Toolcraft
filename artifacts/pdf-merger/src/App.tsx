@@ -14,7 +14,6 @@ import Split from "@/pages/split";
 import Compress from "@/pages/compress";
 import About from "@/pages/about";
 import Scanner from "@/pages/scanner";
-import BgRemover from "@/pages/bg-remover";
 
 const queryClient = new QueryClient();
 
@@ -66,7 +65,6 @@ function Router() {
       <Route path="/pdf/pdf-to-jpg" component={PdfToJpg} />
       <Route path="/pdf/split" component={Split} />
       <Route path="/pdf/compress" component={Compress} />
-      <Route path="/bg-remover" component={BgRemover} />
       <Route component={NotFound} />
     </Switch>
   );
