@@ -16,6 +16,7 @@ export interface Translations {
     pdfTools: { title: string; description: string; tools: string[] };
     scanner: { title: string; description: string; tools: string[] };
     incomeCalc: { title: string; description: string; tools: string[] };
+    bgRemover: { title: string; description: string; tools: string[] };
   };
   dragToReorder: string;
   change: string;
@@ -151,6 +152,11 @@ const en: Translations = {
       description: "Calculate taxes, salary breakdowns, and financial projections with ease.",
       tools: ["Tax Estimator", "Salary Breakdown", "Take-home Pay"],
     },
+    bgRemover: {
+      title: "Background Remover",
+      description: "Remove image backgrounds instantly using AI — powered by remove.bg.",
+      tools: ["Remove BG", "Transparent PNG", "AI-powered"],
+    },
   },
   dragToReorder: "Drag to reorder",
   change: "Change",
@@ -278,6 +284,11 @@ const bn: Translations = {
       title: "আয় ক্যালকুলেটর",
       description: "কর, বেতন বিভাজন এবং আর্থিক পূর্বাভাস সহজে হিসাব করুন।",
       tools: ["কর অনুমান", "বেতন বিভাজন", "নিট বেতন"],
+    },
+    bgRemover: {
+      title: "ব্যাকগ্রাউন্ড রিমুভার",
+      description: "AI দিয়ে তাৎক্ষণিকভাবে ছবির ব্যাকগ্রাউন্ড মুছুন — remove.bg দ্বারা চালিত।",
+      tools: ["BG মুছুন", "স্বচ্ছ PNG", "AI-চালিত"],
     },
   },
   dragToReorder: "ক্রম পরিবর্তনে টেনে আনুন",
