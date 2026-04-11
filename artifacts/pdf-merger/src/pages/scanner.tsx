@@ -308,6 +308,7 @@ export default function Scanner() {
   const wrapRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const qrTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
 
   // Load OpenCV silently in the background (for warp + enhance only)
   useEffect(() => { loadOpenCV(); }, []);
@@ -452,6 +453,26 @@ export default function Scanner() {
     setMode(meta.defaultEnhance); setCamReady(false); setPhase("idle");
   }, [stopCam, meta.defaultEnhance]);
 
+  const handleGalleryUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    setErr(null);
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      c.getContext("2d")!.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      setCorners(modeDefaultCorners(c.width, c.height, scannerMode));
+      setCaptured(c);
+      setPhase("captured");
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); setErr("Could not load image. Please try another file."); };
+    img.src = url;
+  }, [scannerMode]);
+
   const copyToClipboard = useCallback((text: string) => {
     navigator.clipboard.writeText(text).then(() => {
       setCopied(true); setTimeout(() => setCopied(false), 2000);
@@ -584,9 +605,19 @@ export default function Scanner() {
               </a>
             ))}
           </div>
-          <Button onClick={() => startCam(facing)} size="lg" className="gap-2 px-10">
-            <Camera className="w-5 h-5" /> Start Camera
-          </Button>
+          <div className="flex flex-col sm:flex-row gap-3 w-full max-w-xs">
+            <Button onClick={() => startCam(facing)} size="lg" className="gap-2 flex-1">
+              <Camera className="w-5 h-5" /> Start Camera
+            </Button>
+            {scannerMode !== "qr" && (
+              <Button variant="outline" size="lg" className="gap-2 flex-1"
+                onClick={() => galleryInputRef.current?.click()}>
+                <ImageIcon className="w-5 h-5" /> Upload from Gallery
+              </Button>
+            )}
+          </div>
+          <input ref={galleryInputRef} type="file" accept="image/*" className="hidden"
+            onChange={handleGalleryUpload} />
         </div>
       )}
 
