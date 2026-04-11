@@ -1,9 +1,3 @@
-databases:
-  - name: tolyx-db
-    plan: free
-    databaseName: tolyx
-    user: tolyx
-
 services:
   - type: web
     name: tolyx-app
@@ -17,15 +11,3 @@ services:
         value: production
       - key: PORT
         value: 10000
-      - key: SESSION_SECRET
-        generateValue: true
-      - key: DATABASE_URL
-        fromDatabase:
-          name: tolyx-db
-          property: connectionString
-      - key: GOOGLE_CLIENT_ID
-        sync: false
-      - key: GOOGLE_CLIENT_SECRET
-        sync: false
-      - key: APP_URL
-        sync: false
