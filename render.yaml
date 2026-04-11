@@ -9,8 +9,8 @@ services:
     name: tolyx-app
     runtime: node
     plan: free
-    buildCommand: npm install -g pnpm@10 && npm run build
-    startCommand: npm start
+    buildCommand: node build.mjs
+    startCommand: node artifacts/api-server/dist/index.mjs
     healthCheckPath: /api/healthz
     envVars:
       - key: NODE_ENV
@@ -23,11 +23,9 @@ services:
         fromDatabase:
           name: tolyx-db
           property: connectionString
-      # Set these manually in the Render dashboard after first deploy:
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
-      # Set to your Render app URL, e.g. https://tolyx-app.onrender.com
       - key: APP_URL
         sync: false
