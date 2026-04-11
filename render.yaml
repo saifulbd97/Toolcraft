@@ -10,7 +10,7 @@ services:
     runtime: node
     plan: free
     buildCommand: npm install -g pnpm@10 && pnpm install && pnpm run build:prod
-    startCommand: npm start
+    startCommand: node artifacts/api-server/dist/index.mjs
     healthCheckPath: /api/healthz
     envVars:
       - key: NODE_ENV
