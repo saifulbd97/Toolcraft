@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { motion } from "framer-motion";
-import { FileText, ScanLine, Calculator, ArrowRight, Sparkles } from "lucide-react";
+import { FileText, ScanLine, Calculator, Wand2, ArrowRight, Sparkles } from "lucide-react";
 import { useTranslation } from "@/lib/i18n";
 
 const containerVariants = {
@@ -63,6 +63,18 @@ const categories: CategoryCard[] = [
     barColor: "bg-emerald-500",
     available: true,
   },
+  {
+    key: "bgRemover",
+    icon: Wand2,
+    href: "/bg-remover",
+    color: "bg-violet-500",
+    lightColor: "bg-violet-50",
+    textColor: "text-violet-600",
+    borderHover: "hover:border-violet-200",
+    shadowHover: "hover:shadow-violet-100",
+    barColor: "bg-violet-500",
+    available: true,
+  },
 ];
 
 export default function Landing() {
@@ -90,7 +102,7 @@ export default function Landing() {
         </motion.div>
 
         <motion.div
-          className="grid grid-cols-1 sm:grid-cols-3 gap-5 sm:gap-6"
+          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 sm:gap-6"
           variants={containerVariants}
           initial="hidden"
           animate="visible"
