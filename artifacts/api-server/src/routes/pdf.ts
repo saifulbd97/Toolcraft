@@ -48,11 +48,17 @@ const imageOnly = multer({
 });
 
 async function imageToPdfPage(pdf: PDFDocument, file: Express.Multer.File) {
+  // Node.js Buffer objects from multer can have a non-zero byteOffset within a
+  // shared pool. pdf-lib internally uses `new DataView(data.buffer)` which reads
+  // from the raw ArrayBuffer at offset 0, ignoring byteOffset — resulting in
+  // "SOI not found in JPEG" / "Invalid PNG" errors. Creating a zero-offset copy
+  // with `new Uint8Array(buffer)` fixes this.
+  const data = new Uint8Array(file.buffer);
   let image;
   if (file.mimetype === "image/jpeg") {
-    image = await pdf.embedJpg(file.buffer);
+    image = await pdf.embedJpg(data);
   } else {
-    image = await pdf.embedPng(file.buffer);
+    image = await pdf.embedPng(data);
   }
   const { width, height } = image.scale(1);
   const page = pdf.addPage([width, height]);
