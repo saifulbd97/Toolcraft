@@ -15,9 +15,9 @@ type EnhanceMode = "color" | "clean" | "bw";
 type ScannerMode = "document" | "id" | "receipt" | "qr";
 
 const MODE_META: Record<ScannerMode, { label: string; defaultEnhance: EnhanceMode; hint: string }> = {
-  document: { label: "Document Scan", defaultEnhance: "color", hint: "Drag the blue corners to align with your document" },
-  id:       { label: "ID Card",       defaultEnhance: "color", hint: "Drag the blue corners to align with your ID card" },
-  receipt:  { label: "Receipt",       defaultEnhance: "color", hint: "Drag the blue corners to align with your receipt" },
+  document: { label: "Document Scan", defaultEnhance: "clean", hint: "Drag the blue corners to align with your document" },
+  id:       { label: "ID Card",       defaultEnhance: "clean", hint: "Drag the blue corners to align with your ID card" },
+  receipt:  { label: "Receipt",       defaultEnhance: "clean", hint: "Drag the blue corners to align with your receipt" },
   qr:       { label: "QR Code",       defaultEnhance: "color", hint: "Point camera at a QR code to scan instantly" },
 };
 
@@ -198,54 +198,110 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
     return out;
   }
 
-  // ── Clean: auto-levels per channel — boosts contrast, keeps full color ───
+  // ── Clean: illumination normalization (CamScanner-style) ─────────────────
+  // Each pixel is divided by its local background → paper becomes light white,
+  // text stays dark, colors are preserved, no over-exposure.
   if (mode === "clean") {
     if (cv?.Mat) {
       try {
-        // Use LAB color space: apply CLAHE only on luminance (L), leave hue/sat unchanged
         const mat = t(cv.imread(src));
         const bgr = t(new cv.Mat());
         cv.cvtColor(mat, bgr, cv.COLOR_RGBA2BGR);
+
+        // Convert to float for division
+        const bgr32 = t(new cv.Mat());
+        bgr.convertTo(bgr32, cv.CV_32F);
+
+        // Large Gaussian blur = local background / illumination estimate
+        // Kernel 91 captures broad lighting gradients without edge bleeding
+        const blur32 = t(new cv.Mat());
+        cv.GaussianBlur(bgr32, blur32, new cv.Size(91, 91), 0);
+
+        // Divide original by background, scale to target brightness 230
+        // → paper (pixel ≈ background) → ~230 (light white, not pure white ✓)
+        // → dark text (pixel << background) → stays dark ✓
+        // → colors preserved (uniform scale per pixel, all channels divided equally)
+        const norm32 = t(new cv.Mat());
+        cv.divide(bgr32, blur32, norm32, 230.0);
+
+        // Back to uint8 (divide already clips on conversion)
+        const norm8 = t(new cv.Mat());
+        norm32.convertTo(norm8, cv.CV_8U);
+
+        // Single gentle CLAHE pass on luminance only (clipLimit 1.2 = soft boost)
         const lab = t(new cv.Mat());
-        cv.cvtColor(bgr, lab, cv.COLOR_BGR2Lab);
-        const channels = new cv.MatVector();
-        cv.split(lab, channels);
-        const lCh = t(channels.get(0));
+        cv.cvtColor(norm8, lab, cv.COLOR_BGR2Lab);
+        const chs = new cv.MatVector();
+        cv.split(lab, chs);
+        const lCh = t(chs.get(0));
         try {
-          const clahe = t(new cv.CLAHE(1.5, new cv.Size(8, 8)));
+          const clahe = t(new cv.CLAHE(1.2, new cv.Size(8, 8)));
           clahe.apply(lCh, lCh);
-        } catch { /* CLAHE unavailable */ }
-        channels.set(0, lCh);
+        } catch { /* CLAHE unavailable — skip */ }
+        chs.set(0, lCh);
         const labOut = t(new cv.Mat());
-        cv.merge(channels, labOut);
+        cv.merge(chs, labOut);
+        chs.delete();
+
         const bgrOut = t(new cv.Mat());
         cv.cvtColor(labOut, bgrOut, cv.COLOR_Lab2BGR);
         const rgbaOut = t(new cv.Mat());
         cv.cvtColor(bgrOut, rgbaOut, cv.COLOR_BGR2RGBA);
         cv.imshow(out, rgbaOut);
-        channels.delete();
         cleanup();
         return out;
       } catch { cleanup(); }
     }
-    // Pure-JS fallback: auto-levels per channel (histogram stretch), keep colors
+
+    // Pure-JS fallback: large box blur → divide normalization → light white paper
     ctx.drawImage(src, 0, 0);
     const img = ctx.getImageData(0, 0, out.width, out.height);
-    const d = img.data;
-    let rMin = 255, rMax = 0, gMin = 255, gMax = 0, bMin = 255, bMax = 0;
-    for (let i = 0; i < d.length; i += 4) {
-      if (d[i]   < rMin) rMin = d[i];   if (d[i]   > rMax) rMax = d[i];
-      if (d[i+1] < gMin) gMin = d[i+1]; if (d[i+1] > gMax) gMax = d[i+1];
-      if (d[i+2] < bMin) bMin = d[i+2]; if (d[i+2] > bMax) bMax = d[i+2];
+    const { data: d, width: W, height: H } = img;
+    const N = W * H;
+
+    // Extract luminance
+    const lum = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const j = i * 4;
+      lum[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
     }
-    const rR = Math.max(1, rMax - rMin);
-    const gR = Math.max(1, gMax - gMin);
-    const bR = Math.max(1, bMax - bMin);
-    for (let i = 0; i < d.length; i += 4) {
-      d[i]   = Math.min(255, Math.round((d[i]   - rMin) * 255 / rR));
-      d[i+1] = Math.min(255, Math.round((d[i+1] - gMin) * 255 / gR));
-      d[i+2] = Math.min(255, Math.round((d[i+2] - bMin) * 255 / bR));
+
+    // Separable box blur (horizontal then vertical), radius = ~8% of short side
+    const R = Math.max(20, Math.round(Math.min(W, H) * 0.08));
+    const tmp = new Float32Array(N);
+
+    // Horizontal pass
+    for (let y = 0; y < H; y++) {
+      const row = y * W;
+      let sum = 0;
+      for (let x = -R; x <= R; x++) sum += lum[row + Math.max(0, Math.min(W - 1, x))];
+      for (let x = 0; x < W; x++) {
+        tmp[row + x] = sum / (2 * R + 1);
+        sum += lum[row + Math.min(W - 1, x + R + 1)] - lum[row + Math.max(0, x - R)];
+      }
     }
+
+    // Vertical pass
+    const bg = new Float32Array(N);
+    for (let x = 0; x < W; x++) {
+      let sum = 0;
+      for (let y = -R; y <= R; y++) sum += tmp[Math.max(0, Math.min(H - 1, y)) * W + x];
+      for (let y = 0; y < H; y++) {
+        bg[y * W + x] = sum / (2 * R + 1);
+        sum += tmp[Math.min(H - 1, y + R + 1) * W + x] - tmp[Math.max(0, y - R) * W + x];
+      }
+    }
+
+    // Divide each channel by luminance background, scale to 230
+    for (let i = 0; i < N; i++) {
+      const bgVal = Math.max(12, bg[i]);
+      const scale = 230 / bgVal;
+      const j = i * 4;
+      d[j]     = Math.min(255, Math.max(0, Math.round(d[j]     * scale)));
+      d[j + 1] = Math.min(255, Math.max(0, Math.round(d[j + 1] * scale)));
+      d[j + 2] = Math.min(255, Math.max(0, Math.round(d[j + 2] * scale)));
+    }
+
     ctx.putImageData(img, 0, 0);
     return out;
   }
