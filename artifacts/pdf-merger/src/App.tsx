@@ -1,4 +1,4 @@
-import { Switch, Route, Router as WouterRouter, Link } from "wouter";
+import { Switch, Route, Router as WouterRouter, Link, useLocation } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -12,13 +12,30 @@ import JpgToPdf from "@/pages/jpg-to-pdf";
 import PdfToJpg from "@/pages/pdf-to-jpg";
 import Split from "@/pages/split";
 import Compress from "@/pages/compress";
+import About from "@/pages/about";
 
 const queryClient = new QueryClient();
+
+function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
+  const [location] = useLocation();
+  const active = location === href;
+  return (
+    <Link href={href}>
+      <span
+        className={`text-sm font-medium transition-colors hover:text-indigo-600 ${
+          active ? "text-indigo-600" : "text-muted-foreground"
+        }`}
+      >
+        {children}
+      </span>
+    </Link>
+  );
+}
 
 function Navbar() {
   const base = import.meta.env.BASE_URL.replace(/\/$/, "");
   return (
-    <nav className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-4 h-14 bg-white/90 backdrop-blur border-b border-border">
+    <nav className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-5 h-14 bg-white/90 backdrop-blur border-b border-border">
       <Link href="/">
         <img
           src={`${base}/logo.png`}
@@ -27,7 +44,10 @@ function Navbar() {
           className="h-auto cursor-pointer"
         />
       </Link>
-      <LanguageToggle />
+      <div className="flex items-center gap-5">
+        <NavLink href="/about">About</NavLink>
+        <LanguageToggle />
+      </div>
     </nav>
   );
 }
@@ -36,6 +56,7 @@ function Router() {
   return (
     <Switch>
       <Route path="/" component={Landing} />
+      <Route path="/about" component={About} />
       <Route path="/pdf" component={Dashboard} />
       <Route path="/pdf/merge" component={MergePdf} />
       <Route path="/pdf/jpg-to-pdf" component={JpgToPdf} />
