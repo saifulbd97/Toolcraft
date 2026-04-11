@@ -3,8 +3,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { LanguageProvider } from "@/lib/i18n";
+import { AuthProvider } from "@/lib/auth";
 import { LanguageToggle } from "@/components/LanguageToggle";
+import { UserMenu } from "@/components/UserMenu";
+import { RequireAuth } from "@/components/RequireAuth";
 import NotFound from "@/pages/not-found";
+import Login from "@/pages/login";
 import Landing from "@/pages/landing";
 import Dashboard from "@/pages/dashboard";
 import MergePdf from "@/pages/home";
@@ -15,16 +19,40 @@ import Compress from "@/pages/compress";
 
 const queryClient = new QueryClient();
 
+function TopBar() {
+  return (
+    <div className="fixed top-3 right-3 z-50 flex items-center gap-2">
+      <LanguageToggle />
+      <UserMenu />
+    </div>
+  );
+}
+
 function Router() {
   return (
     <Switch>
-      <Route path="/" component={Landing} />
-      <Route path="/pdf" component={Dashboard} />
-      <Route path="/pdf/merge" component={MergePdf} />
-      <Route path="/pdf/jpg-to-pdf" component={JpgToPdf} />
-      <Route path="/pdf/pdf-to-jpg" component={PdfToJpg} />
-      <Route path="/pdf/split" component={Split} />
-      <Route path="/pdf/compress" component={Compress} />
+      <Route path="/login" component={Login} />
+      <Route path="/">
+        <RequireAuth><Landing /></RequireAuth>
+      </Route>
+      <Route path="/pdf">
+        <RequireAuth><Dashboard /></RequireAuth>
+      </Route>
+      <Route path="/pdf/merge">
+        <RequireAuth><MergePdf /></RequireAuth>
+      </Route>
+      <Route path="/pdf/jpg-to-pdf">
+        <RequireAuth><JpgToPdf /></RequireAuth>
+      </Route>
+      <Route path="/pdf/pdf-to-jpg">
+        <RequireAuth><PdfToJpg /></RequireAuth>
+      </Route>
+      <Route path="/pdf/split">
+        <RequireAuth><Split /></RequireAuth>
+      </Route>
+      <Route path="/pdf/compress">
+        <RequireAuth><Compress /></RequireAuth>
+      </Route>
       <Route component={NotFound} />
     </Switch>
   );
@@ -35,11 +63,13 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <LanguageProvider>
-          <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-            <LanguageToggle />
-            <Router />
-          </WouterRouter>
-          <Toaster />
+          <AuthProvider>
+            <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+              <TopBar />
+              <Router />
+            </WouterRouter>
+            <Toaster />
+          </AuthProvider>
         </LanguageProvider>
       </TooltipProvider>
     </QueryClientProvider>

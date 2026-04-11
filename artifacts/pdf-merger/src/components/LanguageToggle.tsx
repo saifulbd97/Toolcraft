@@ -5,7 +5,7 @@ export function LanguageToggle() {
   return (
     <button
       onClick={toggleLang}
-      className="fixed top-4 right-4 z-50 flex items-center gap-1.5 rounded-full border border-border bg-background/90 backdrop-blur-sm px-3.5 py-1.5 text-sm font-medium text-foreground shadow-sm hover:bg-muted transition-colors"
+      className="flex items-center gap-1.5 rounded-full border border-border bg-background/90 backdrop-blur-sm px-3.5 py-1.5 text-sm font-medium text-foreground shadow-sm hover:bg-muted transition-colors"
       aria-label="Toggle language"
       data-testid="lang-toggle"
     >
