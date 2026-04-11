@@ -16,6 +16,7 @@ import JpgToPdf from "@/pages/jpg-to-pdf";
 import PdfToJpg from "@/pages/pdf-to-jpg";
 import Split from "@/pages/split";
 import Compress from "@/pages/compress";
+import IncomeCalculator from "@/pages/income-calculator";
 
 const queryClient = new QueryClient();
 
@@ -31,28 +32,23 @@ function TopBar() {
 function Router() {
   return (
     <Switch>
+      {/* Public routes */}
+      <Route path="/" component={Landing} />
       <Route path="/login" component={Login} />
-      <Route path="/">
-        <RequireAuth><Landing /></RequireAuth>
+      <Route path="/pdf" component={Dashboard} />
+      <Route path="/pdf/merge" component={MergePdf} />
+      <Route path="/pdf/jpg-to-pdf" component={JpgToPdf} />
+      <Route path="/pdf/pdf-to-jpg" component={PdfToJpg} />
+      <Route path="/pdf/split" component={Split} />
+      <Route path="/pdf/compress" component={Compress} />
+
+      {/* Protected routes */}
+      <Route path="/income">
+        <RequireAuth returnTo="/income">
+          <IncomeCalculator />
+        </RequireAuth>
       </Route>
-      <Route path="/pdf">
-        <RequireAuth><Dashboard /></RequireAuth>
-      </Route>
-      <Route path="/pdf/merge">
-        <RequireAuth><MergePdf /></RequireAuth>
-      </Route>
-      <Route path="/pdf/jpg-to-pdf">
-        <RequireAuth><JpgToPdf /></RequireAuth>
-      </Route>
-      <Route path="/pdf/pdf-to-jpg">
-        <RequireAuth><PdfToJpg /></RequireAuth>
-      </Route>
-      <Route path="/pdf/split">
-        <RequireAuth><Split /></RequireAuth>
-      </Route>
-      <Route path="/pdf/compress">
-        <RequireAuth><Compress /></RequireAuth>
-      </Route>
+
       <Route component={NotFound} />
     </Switch>
   );

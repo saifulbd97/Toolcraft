@@ -2,15 +2,23 @@ import { useEffect } from "react";
 import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 
-export function RequireAuth({ children }: { children: React.ReactNode }) {
+interface RequireAuthProps {
+  children: React.ReactNode;
+  returnTo?: string;
+}
+
+export function RequireAuth({ children, returnTo }: RequireAuthProps) {
   const { user, loading } = useAuth();
-  const [, navigate] = useLocation();
+  const [location, navigate] = useLocation();
+
+  const destination = returnTo ?? location;
 
   useEffect(() => {
     if (!loading && !user) {
-      navigate("/login");
+      const encodedReturn = encodeURIComponent(destination);
+      navigate(`/login?returnTo=${encodedReturn}`);
     }
-  }, [user, loading, navigate]);
+  }, [user, loading, navigate, destination]);
 
   if (loading) {
     return (

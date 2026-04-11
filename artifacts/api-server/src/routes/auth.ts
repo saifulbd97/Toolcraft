@@ -33,18 +33,27 @@ passport.use(
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((user, done) => done(null, user as Express.User));
 
+const ALLOWED_RETURN_PATHS = new Set(["/income"]);
+const DEFAULT_RETURN = "/income";
+
 const router = Router();
 
-router.get(
-  "/auth/google",
-  passport.authenticate("google", { scope: ["profile", "email"] })
-);
+router.get("/auth/google", (req, res, next) => {
+  const returnTo = req.query["returnTo"] as string | undefined;
+  if (returnTo && ALLOWED_RETURN_PATHS.has(returnTo)) {
+    (req.session as Record<string, unknown>)["returnTo"] = returnTo;
+  }
+  passport.authenticate("google", { scope: ["profile", "email"] })(req, res, next);
+});
 
 router.get(
   "/auth/google/callback",
   passport.authenticate("google", { failureRedirect: "/login?error=1" }),
-  (_req, res) => {
-    res.redirect("/");
+  (req, res) => {
+    const returnTo = (req.session as Record<string, unknown>)["returnTo"] as string | undefined;
+    delete (req.session as Record<string, unknown>)["returnTo"];
+    const dest = returnTo && ALLOWED_RETURN_PATHS.has(returnTo) ? returnTo : DEFAULT_RETURN;
+    res.redirect(dest);
   }
 );
 

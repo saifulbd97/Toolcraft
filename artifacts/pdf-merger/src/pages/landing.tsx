@@ -54,14 +54,14 @@ const categories: CategoryCard[] = [
   {
     key: "incomeCalc",
     icon: Calculator,
-    href: "/income-calculator",
+    href: "/income",
     color: "bg-emerald-500",
     lightColor: "bg-emerald-50",
     textColor: "text-emerald-600",
     borderHover: "hover:border-emerald-200",
     shadowHover: "hover:shadow-emerald-100",
     barColor: "bg-emerald-500",
-    available: false,
+    available: true,
   },
 ];
 

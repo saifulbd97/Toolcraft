@@ -1,21 +1,27 @@
 import { motion } from "framer-motion";
 import { useEffect } from "react";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { useAuth } from "@/lib/auth";
 
 export default function Login() {
   const { user, loading } = useAuth();
   const [, navigate] = useLocation();
+  const search = useSearch();
+
+  const params = new URLSearchParams(search);
+  const returnTo = params.get("returnTo") ?? "/income";
+  const hasError = params.get("error") === "1";
 
   useEffect(() => {
     if (!loading && user) {
-      navigate("/");
+      navigate(returnTo);
     }
-  }, [user, loading, navigate]);
+  }, [user, loading, navigate, returnTo]);
 
   const handleGoogleLogin = () => {
     const base = import.meta.env.BASE_URL.replace(/\/$/, "");
-    window.location.href = `${base}/api/auth/google`;
+    const encoded = encodeURIComponent(returnTo);
+    window.location.href = `${base}/api/auth/google?returnTo=${encoded}`;
   };
 
   return (
@@ -27,18 +33,24 @@ export default function Login() {
         transition={{ duration: 0.4, ease: "easeOut" }}
       >
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-50 text-indigo-600 mb-5 text-2xl font-bold">
-            T
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-emerald-50 text-emerald-600 mb-5 text-2xl font-bold">
+            🧮
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-foreground mb-2">
-            Welcome back
+            Sign in to continue
           </h1>
           <p className="text-sm text-muted-foreground">
-            Sign in to access your toolkit
+            Income Calculator requires a free account
           </p>
         </div>
 
-        <div className="bg-card border border-border rounded-2xl p-6 shadow-sm">
+        <div className="bg-card border border-border rounded-2xl p-6 shadow-sm space-y-3">
+          {hasError && (
+            <p className="text-sm text-destructive text-center bg-destructive/10 rounded-lg px-3 py-2">
+              Login failed — please try again.
+            </p>
+          )}
+
           <button
             onClick={handleGoogleLogin}
             className="w-full flex items-center justify-center gap-3 bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-all duration-150 shadow-sm active:scale-95"
@@ -50,9 +62,9 @@ export default function Login() {
         </div>
 
         <p className="text-center text-xs text-muted-foreground mt-6">
-          By signing in, you agree to use this app responsibly.
-          <br />
           No account creation needed — just your Google account.
+          <br />
+          All other tools are free without login.
         </p>
       </motion.div>
     </div>
