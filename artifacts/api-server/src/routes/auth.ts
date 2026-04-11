@@ -44,7 +44,7 @@ const router = Router();
 router.get("/auth/google", (req, res, next) => {
   const returnTo = req.query["returnTo"] as string | undefined;
   if (returnTo && ALLOWED_RETURN_PATHS.has(returnTo)) {
-    (req.session as Record<string, unknown>)["returnTo"] = returnTo;
+    req.session.returnTo = returnTo;
   }
   passport.authenticate("google", { scope: ["profile", "email"] })(req, res, next);
 });
@@ -53,8 +53,8 @@ router.get(
   "/auth/google/callback",
   passport.authenticate("google", { failureRedirect: "/login?error=1" }),
   (req, res) => {
-    const returnTo = (req.session as Record<string, unknown>)["returnTo"] as string | undefined;
-    delete (req.session as Record<string, unknown>)["returnTo"];
+    const returnTo = req.session.returnTo;
+    delete req.session.returnTo;
     const dest = returnTo && ALLOWED_RETURN_PATHS.has(returnTo) ? returnTo : DEFAULT_RETURN;
     res.redirect(dest);
   }
