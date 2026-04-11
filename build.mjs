@@ -1,44 +1,34 @@
 /**
- * Root build script — called by `npm run build`.
+ * Build script for Toolcraft.
  *
- * Uses pnpm internally for workspace dependency management.
- * Automatically installs pnpm if it is not already available,
- * so the top-level interface works with plain npm:
+ * Runs two sequential builds:
+ *   1. Vite   → artifacts/pdf-merger/dist/public/  (React frontend)
+ *   2. esbuild → artifacts/api-server/dist/index.mjs (Express backend)
  *
- *   npm install   (installs root devDeps: typescript, prettier)
- *   npm run build (this script)
- *   npm start
+ * Usage:
+ *   npm run build
  */
-import { execSync, spawnSync } from "child_process";
-import { fileURLToPath } from "url";
+import { execSync } from "child_process";
 import path from "path";
+import { fileURLToPath } from "url";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 
 function run(cmd, cwd = root) {
-  console.log(`\n> ${cmd}${cwd !== root ? ` (in ${path.relative(root, cwd)})` : ""}`);
+  const rel = path.relative(root, cwd) || ".";
+  console.log(`\n[build] ${cmd}  (cwd: ${rel})`);
   execSync(cmd, { cwd, stdio: "inherit" });
 }
 
-function hasPnpm() {
-  const result = spawnSync("pnpm", ["--version"], { stdio: "ignore" });
-  return result.status === 0;
-}
+const viteBin = path.join(root, "node_modules", ".bin", "vite");
+const pdfMergerDir = path.join(root, "artifacts", "pdf-merger");
+const apiServerDir = path.join(root, "artifacts", "api-server");
 
-// Auto-install pnpm if not available (e.g. on Render)
-if (!hasPnpm()) {
-  console.log("pnpm not found — installing pnpm@10 via npm...");
-  run("npm install -g pnpm@10");
-}
+console.log("=== Building React frontend ===");
+run(`"${viteBin}" build --config vite.config.ts`, pdfMergerDir);
 
-// Install all workspace dependencies
-run("pnpm install");
-
-// Build React frontend (outputs to artifacts/pdf-merger/dist/public/)
-run("pnpm run build", path.join(root, "artifacts/pdf-merger"));
-
-// Build Express API server (outputs to artifacts/api-server/dist/index.mjs)
-run("pnpm run build", path.join(root, "artifacts/api-server"));
+console.log("\n=== Building Express API server ===");
+run(`node build.mjs`, apiServerDir);
 
 console.log("\nBuild complete.");
 console.log("  Frontend : artifacts/pdf-merger/dist/public/");
