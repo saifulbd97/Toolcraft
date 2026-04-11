@@ -11,14 +11,14 @@ import { Button } from "@/components/ui/button";
 interface Pt { x: number; y: number }
 type Corners = [Pt, Pt, Pt, Pt];
 type Phase = "idle" | "scanning" | "captured" | "result";
-type EnhanceMode = "original" | "clean" | "bw";
+type EnhanceMode = "color" | "clean" | "bw";
 type ScannerMode = "document" | "id" | "receipt" | "qr";
 
 const MODE_META: Record<ScannerMode, { label: string; defaultEnhance: EnhanceMode; hint: string }> = {
-  document: { label: "Document Scan", defaultEnhance: "clean",    hint: "Drag the blue corners to align with your document" },
-  id:       { label: "ID Card",       defaultEnhance: "original", hint: "Drag the blue corners to align with your ID card" },
-  receipt:  { label: "Receipt",       defaultEnhance: "clean",    hint: "Drag the blue corners to align with your receipt" },
-  qr:       { label: "QR Code",       defaultEnhance: "original", hint: "Point camera at a QR code to scan instantly" },
+  document: { label: "Document Scan", defaultEnhance: "color", hint: "Drag the blue corners to align with your document" },
+  id:       { label: "ID Card",       defaultEnhance: "color", hint: "Drag the blue corners to align with your ID card" },
+  receipt:  { label: "Receipt",       defaultEnhance: "color", hint: "Drag the blue corners to align with your receipt" },
+  qr:       { label: "QR Code",       defaultEnhance: "color", hint: "Point camera at a QR code to scan instantly" },
 };
 
 // ─── Default corners ──────────────────────────────────────────────────────────
@@ -192,90 +192,90 @@ function enhance(src: HTMLCanvasElement, mode: EnhanceMode): HTMLCanvasElement {
   const t = <T,>(m: T): T => { mats.push(m); return m; };
   const cleanup = () => { for (const m of mats) { try { m.delete(); } catch {} } };
 
-  // ── Original: just copy, no processing ───────────────────────────────────
-  if (mode === "original") {
+  // ── Color: natural color, no processing ──────────────────────────────────
+  if (mode === "color") {
     ctx.drawImage(src, 0, 0);
     return out;
   }
 
-  // ── Clean: grayscale + gentle contrast lift (CLAHE if available) ─────────
+  // ── Clean: auto-levels per channel — boosts contrast, keeps full color ───
   if (mode === "clean") {
     if (cv?.Mat) {
       try {
+        // Use LAB color space: apply CLAHE only on luminance (L), leave hue/sat unchanged
         const mat = t(cv.imread(src));
-        const gray = t(new cv.Mat());
-        cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
-
-        // Gentle blur to reduce camera noise
-        const blurred = t(new cv.Mat());
-        cv.GaussianBlur(gray, blurred, new cv.Size(3, 3), 0);
-
-        // Try CLAHE for local contrast normalization
-        let normalized: any = blurred;
+        const bgr = t(new cv.Mat());
+        cv.cvtColor(mat, bgr, cv.COLOR_RGBA2BGR);
+        const lab = t(new cv.Mat());
+        cv.cvtColor(bgr, lab, cv.COLOR_BGR2Lab);
+        const channels = new cv.MatVector();
+        cv.split(lab, channels);
+        const lCh = t(channels.get(0));
         try {
-          const clahe = t(new cv.CLAHE(2.0, new cv.Size(8, 8)));
-          const cl = t(new cv.Mat());
-          clahe.apply(blurred, cl);
-          normalized = cl;
-        } catch { /* CLAHE unavailable, use blurred as-is */ }
-
-        const rgba = t(new cv.Mat());
-        cv.cvtColor(normalized, rgba, cv.COLOR_GRAY2RGBA);
-        cv.imshow(out, rgba);
+          const clahe = t(new cv.CLAHE(1.5, new cv.Size(8, 8)));
+          clahe.apply(lCh, lCh);
+        } catch { /* CLAHE unavailable */ }
+        channels.set(0, lCh);
+        const labOut = t(new cv.Mat());
+        cv.merge(channels, labOut);
+        const bgrOut = t(new cv.Mat());
+        cv.cvtColor(labOut, bgrOut, cv.COLOR_Lab2BGR);
+        const rgbaOut = t(new cv.Mat());
+        cv.cvtColor(bgrOut, rgbaOut, cv.COLOR_BGR2RGBA);
+        cv.imshow(out, rgbaOut);
+        channels.delete();
         cleanup();
         return out;
       } catch { cleanup(); }
     }
-    // Pure-JS fallback: convert to grayscale with mild contrast
+    // Pure-JS fallback: auto-levels per channel (histogram stretch), keep colors
     ctx.drawImage(src, 0, 0);
     const img = ctx.getImageData(0, 0, out.width, out.height);
     const d = img.data;
+    let rMin = 255, rMax = 0, gMin = 255, gMax = 0, bMin = 255, bMax = 0;
     for (let i = 0; i < d.length; i += 4) {
-      const g = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
-      // Gentle s-curve: lift shadows, keep highlights
-      const v = Math.min(255, Math.max(0, Math.round((g - 128) * 1.2 + 138)));
-      d[i] = d[i + 1] = d[i + 2] = v;
+      if (d[i]   < rMin) rMin = d[i];   if (d[i]   > rMax) rMax = d[i];
+      if (d[i+1] < gMin) gMin = d[i+1]; if (d[i+1] > gMax) gMax = d[i+1];
+      if (d[i+2] < bMin) bMin = d[i+2]; if (d[i+2] > bMax) bMax = d[i+2];
+    }
+    const rR = Math.max(1, rMax - rMin);
+    const gR = Math.max(1, gMax - gMin);
+    const bR = Math.max(1, bMax - bMin);
+    for (let i = 0; i < d.length; i += 4) {
+      d[i]   = Math.min(255, Math.round((d[i]   - rMin) * 255 / rR));
+      d[i+1] = Math.min(255, Math.round((d[i+1] - gMin) * 255 / gR));
+      d[i+2] = Math.min(255, Math.round((d[i+2] - bMin) * 255 / bR));
     }
     ctx.putImageData(img, 0, 0);
     return out;
   }
 
-  // ── B&W: soft adaptive threshold — readable text, clean white background ──
+  // ── B&W: gentle adaptive threshold — details visible, not over-darkened ──
   if (cv?.Mat) {
     try {
       const mat = t(cv.imread(src));
       const gray = t(new cv.Mat());
       cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
-
       const blurred = t(new cv.Mat());
       cv.GaussianBlur(gray, blurred, new cv.Size(3, 3), 0);
-
-      // LARGE block size + HIGH C = softer threshold (not harsh)
-      // Block 51 = examines large neighbourhood → handles gradual lighting changes
-      // C = 18 = subtracts enough to keep text black but keeps thin strokes
+      // Large block (71) + high C (30) = soft threshold — only truly dark pixels
+      // turn black; mid-tones and details are preserved rather than forced to white
       const thr = t(new cv.Mat());
-      cv.adaptiveThreshold(blurred, thr, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 51, 18);
-
-      // Tiny morphological open to remove isolated noise pixels
-      const k = t(cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(2, 2)));
-      const cleaned = t(new cv.Mat());
-      cv.morphologyEx(thr, cleaned, cv.MORPH_OPEN, k);
-
+      cv.adaptiveThreshold(blurred, thr, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 71, 30);
       const rgba = t(new cv.Mat());
-      cv.cvtColor(cleaned, rgba, cv.COLOR_GRAY2RGBA);
+      cv.cvtColor(thr, rgba, cv.COLOR_GRAY2RGBA);
       cv.imshow(out, rgba);
       cleanup();
       return out;
     } catch { cleanup(); }
   }
-  // Pure-JS fallback: gentle global threshold
+  // Pure-JS fallback: soft global threshold — 170 cutoff keeps most mid-tones white
   ctx.drawImage(src, 0, 0);
   const img = ctx.getImageData(0, 0, out.width, out.height);
   const d = img.data;
   for (let i = 0; i < d.length; i += 4) {
     const g = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
-    // Soft threshold: 140 cutoff (not 128), so light grays stay white
-    const v = g > 140 ? 255 : Math.max(0, g - 30);
+    const v = g > 170 ? 255 : g < 85 ? 0 : g;
     d[i] = d[i + 1] = d[i + 2] = v;
   }
   ctx.putImageData(img, 0, 0);
@@ -516,12 +516,12 @@ export default function Scanner() {
 
   const EnhanceModeBar = ({ onChange }: { onChange: (m: EnhanceMode) => void }) => (
     <div className="flex gap-2 justify-center flex-wrap">
-      {(["original", "clean", "bw"] as const).map(m => (
+      {(["color", "clean", "bw"] as const).map(m => (
         <button key={m} onClick={() => onChange(m)}
           className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
             mode === m ? "bg-indigo-600 text-white shadow" : "bg-muted text-muted-foreground hover:bg-accent"
           }`}>
-          {{ original: "Original", clean: "Clean", bw: "B&W" }[m]}
+          {{ color: "Color", clean: "Clean", bw: "B&W" }[m]}
         </button>
       ))}
     </div>
