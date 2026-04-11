@@ -1,16 +1,18 @@
 {
   "extends": "./tsconfig.base.json",
-  "compileOnSave": false,
-  "files": [],
-  "references": [
-    {
-      "path": "./lib/db"
-    },
-    {
-      "path": "./lib/api-client-react"
-    },
-    {
-      "path": "./lib/api-zod"
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "paths": {
+      "@workspace/api-zod": ["./lib/api-zod/src/index.ts"],
+      "@workspace/db": ["./lib/db/src/index.ts"],
+      "@workspace/db/schema": ["./lib/db/src/schema/index.ts"],
+      "@workspace/api-client-react": ["./lib/api-client-react/src/index.ts"]
     }
+  },
+  "include": [
+    "artifacts/api-server/src/**/*",
+    "artifacts/pdf-merger/src/**/*",
+    "lib/*/src/**/*"
   ]
 }
