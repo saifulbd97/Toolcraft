@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.toolcraft.sbd"
+    namespace = "com.toolsono.sbd"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.toolcraft.sbd"
+        applicationId = "com.toolsono.sbd"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
