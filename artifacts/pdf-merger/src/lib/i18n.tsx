@@ -32,6 +32,7 @@ export interface Translations {
     pdfToJpg: { title: string; description: string };
     split: { title: string; description: string };
     compress: { title: string; description: string };
+    sign: { title: string; description: string };
   };
   // Merge page
   mergeTitle: string;
@@ -171,6 +172,7 @@ const en: Translations = {
     pdfToJpg: { title: "PDF to JPG", description: "Extract pages from a PDF as high-quality images." },
     split: { title: "Split PDF", description: "Separate a PDF into individual pages or ranges." },
     compress: { title: "Compress PDF", description: "Reduce PDF file size while keeping quality high." },
+    sign: { title: "Add Signature", description: "Draw, type, or upload a signature and place it anywhere on your PDF." },
   },
   mergeTitle: "Merge PDFs",
   mergeSubtitle: "Combine PDFs and images (JPG, PNG) into one document, quickly and securely.",
@@ -304,6 +306,7 @@ const bn: Translations = {
     pdfToJpg: { title: "পিডিএফ থেকে JPG", description: "পিডিএফ থেকে উচ্চমানের ছবি হিসেবে পৃষ্ঠা বের করুন।" },
     split: { title: "পিডিএফ বিভক্ত", description: "পিডিএফকে আলাদা পৃষ্ঠা বা নির্দিষ্ট রেঞ্জে বিভক্ত করুন।" },
     compress: { title: "পিডিএফ কম্প্রেস", description: "মান বজায় রেখে পিডিএফের আকার ছোট করুন।" },
+    sign: { title: "স্বাক্ষর যোগ করুন", description: "আঁকুন, টাইপ করুন বা স্বাক্ষর আপলোড করুন এবং পিডিএফে যেকোনো স্থানে রাখুন।" },
   },
   mergeTitle: "পিডিএফ মার্জ করুন",
   mergeSubtitle: "পিডিএফ ও ছবি (JPG, PNG) দ্রুত ও নিরাপদে একটি ডকুমেন্টে একত্রিত করুন।",
