@@ -42,7 +42,7 @@ function Navbar() {
       <Link href="/">
         <img
           src={`${base}/logo.png`}
-          alt="Toolcraft"
+          alt="Toolsono"
           width={100}
           className="h-auto cursor-pointer"
         />
