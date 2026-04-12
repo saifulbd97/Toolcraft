@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 import {
   ArrowLeft, Camera, CameraOff, CheckCircle, ClipboardCopy,
-  ExternalLink, FileDown, FlipHorizontal,
+  ExternalLink, FileDown, FlipHorizontal, ImageIcon,
   Loader2, QrCode, RefreshCcw, ScanLine,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,160 @@ function defaultCorners(w: number, h: number): Corners {
   const mx = w * 0.07;
   const my = h * 0.07;
   return [{ x: mx, y: my }, { x: w - mx, y: my }, { x: w - mx, y: h - my }, { x: mx, y: h - my }];
+}
+
+// ─── Auto-crop: lightweight pure-canvas edge detection ────────────────────────
+// Steps: thumbnail → contrast boost → Sobel → axis projections → boundary find
+// Falls back to default corners if detection is not confident.
+function autoDetectCorners(canvas: HTMLCanvasElement): Corners {
+  const MAX = 320;
+  const scale = Math.min(1, MAX / Math.max(canvas.width, canvas.height));
+  const tw = Math.round(canvas.width * scale);
+  const th = Math.round(canvas.height * scale);
+
+  const thumb = document.createElement("canvas");
+  thumb.width = tw; thumb.height = th;
+  const ctx = thumb.getContext("2d")!;
+  ctx.drawImage(canvas, 0, 0, tw, th);
+  const { data } = ctx.getImageData(0, 0, tw, th);
+
+  // Step 1: grayscale + contrast boost (S-curve style: clamp tails, stretch mid)
+  const gray = new Uint8Array(tw * th);
+  for (let i = 0; i < tw * th; i++) {
+    const j = i * 4;
+    let lum = 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
+    // Boost contrast: pull towards extremes
+    lum = (lum - 128) * 2.2 + 128;
+    gray[i] = Math.min(255, Math.max(0, lum));
+  }
+
+  // Step 2: Sobel edge magnitude
+  const edges = new Uint8Array(tw * th);
+  for (let y = 1; y < th - 1; y++) {
+    for (let x = 1; x < tw - 1; x++) {
+      const gx =
+        -gray[(y - 1) * tw + x - 1] + gray[(y - 1) * tw + x + 1] +
+        -2 * gray[y * tw + x - 1]   + 2 * gray[y * tw + x + 1] +
+        -gray[(y + 1) * tw + x - 1] + gray[(y + 1) * tw + x + 1];
+      const gy =
+        gray[(y - 1) * tw + x - 1] + 2 * gray[(y - 1) * tw + x] + gray[(y - 1) * tw + x + 1] +
+        -gray[(y + 1) * tw + x - 1] - 2 * gray[(y + 1) * tw + x] - gray[(y + 1) * tw + x + 1];
+      edges[y * tw + x] = Math.min(255, Math.sqrt(gx * gx + gy * gy));
+    }
+  }
+
+  const EDGE_THR = 40;
+
+  // Step 3: project edge counts onto each axis
+  const projX = new Float32Array(tw);
+  const projY = new Float32Array(th);
+  for (let y = 0; y < th; y++) {
+    for (let x = 0; x < tw; x++) {
+      if (edges[y * tw + x] > EDGE_THR) { projX[x]++; projY[y]++; }
+    }
+  }
+
+  // Smooth projections (3-tap)
+  for (let i = 1; i < tw - 1; i++) projX[i] = (projX[i - 1] + projX[i] + projX[i + 1]) / 3;
+  for (let i = 1; i < th - 1; i++) projY[i] = (projY[i - 1] + projY[i] + projY[i + 1]) / 3;
+
+  // Step 4: background colour from the 4 tiny corner patches
+  let bgSum = 0, bgN = 0;
+  const patchR = Math.max(2, Math.round(Math.min(tw, th) * 0.04));
+  for (const [px, py] of [[0, 0], [tw - patchR, 0], [0, th - patchR], [tw - patchR, th - patchR]]) {
+    for (let dy = 0; dy < patchR; dy++) {
+      for (let dx = 0; dx < patchR; dx++) {
+        const j = ((py + dy) * tw + px + dx) * 4;
+        bgSum += 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
+        bgN++;
+      }
+    }
+  }
+  const bgLum = bgSum / bgN;
+
+  // Step 5: scan inward from each edge, pick first strong edge line
+  // Require edge density >= 3% of perpendicular dimension
+  const xReq = th * 0.03;
+  const yReq = tw * 0.03;
+
+  const margin = 0.04; // don't pick a boundary closer than 4% to the edge
+  let left = Math.round(tw * margin);
+  let right = Math.round(tw * (1 - margin));
+  let top = Math.round(th * margin);
+  let bottom = Math.round(th * (1 - margin));
+
+  const mid = { x: tw / 2, y: th / 2 };
+
+  for (let x = Math.round(tw * margin); x < mid.x; x++) {
+    if (projX[x] >= xReq) { left = x; break; }
+  }
+  for (let x = Math.round(tw * (1 - margin)); x > mid.x; x--) {
+    if (projX[x] >= xReq) { right = x; break; }
+  }
+  for (let y = Math.round(th * margin); y < mid.y; y++) {
+    if (projY[y] >= yReq) { top = y; break; }
+  }
+  for (let y = Math.round(th * (1 - margin)); y > mid.y; y--) {
+    if (projY[y] >= yReq) { bottom = y; break; }
+  }
+
+  // Step 6: background-diff scan refines the box if detected box is too large
+  // Scan each column/row for where background colour switches to document colour
+  const BG_DIFF = bgLum > 160 ? 35 : 40; // more sensitive for light backgrounds
+  const refineX = (startX: number, endX: number, dir: 1 | -1): number => {
+    for (let x = startX; dir === 1 ? x < endX : x > endX; x += dir) {
+      let diffSum = 0;
+      const samples = Math.min(20, th);
+      const step = Math.floor(th / samples);
+      for (let y = 0; y < th; y += step) {
+        const j = (y * tw + x) * 4;
+        const lum = 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
+        diffSum += Math.abs(lum - bgLum);
+      }
+      if (diffSum / samples > BG_DIFF) return x;
+    }
+    return startX;
+  };
+  const refineY = (startY: number, endY: number, dir: 1 | -1): number => {
+    for (let y = startY; dir === 1 ? y < endY : y > endY; y += dir) {
+      let diffSum = 0;
+      const samples = Math.min(20, tw);
+      const step = Math.floor(tw / samples);
+      for (let x = 0; x < tw; x += step) {
+        const j = (y * tw + x) * 4;
+        const lum = 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
+        diffSum += Math.abs(lum - bgLum);
+      }
+      if (diffSum / samples > BG_DIFF) return y;
+    }
+    return startY;
+  };
+
+  const bgLeft   = refineX(Math.round(tw * margin), Math.round(tw * 0.5), 1);
+  const bgRight  = refineX(Math.round(tw * (1 - margin)), Math.round(tw * 0.5), -1);
+  const bgTop    = refineY(Math.round(th * margin), Math.round(th * 0.5), 1);
+  const bgBottom = refineY(Math.round(th * (1 - margin)), Math.round(th * 0.5), -1);
+
+  // Blend: take the inner boundary (tighter crop) from both signals
+  const pad = 2; // 2 thumbnail pixels padding so we don't cut right at the edge
+  const fl = Math.min(left, bgLeft) + pad;
+  const fr = Math.max(right, bgRight) - pad;
+  const ft = Math.min(top, bgTop) + pad;
+  const fb = Math.max(bottom, bgBottom) - pad;
+
+  // Confidence check: if detected region is impossibly small, fall back
+  if (fr - fl < tw * 0.15 || fb - ft < th * 0.15) {
+    return defaultCorners(canvas.width, canvas.height);
+  }
+
+  const sx = canvas.width / tw;
+  const sy = canvas.height / th;
+  return [
+    { x: fl * sx, y: ft * sy },
+    { x: fr * sx, y: ft * sy },
+    { x: fr * sx, y: fb * sy },
+    { x: fl * sx, y: fb * sy },
+  ];
 }
 
 // ID card ISO 7810 ratio: 85.60 × 53.98 mm ≈ 1.586
@@ -382,6 +536,9 @@ export default function Scanner() {
   const [facing, setFacing] = useState<"environment" | "user">("environment");
   const [dragging, setDragging] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [autoDetected, setAutoDetected] = useState(false);
+  const [animating, setAnimating] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [camReady, setCamReady] = useState(false);
   const [qrResult, setQrResult] = useState<string | null>(null);
@@ -472,9 +629,29 @@ export default function Scanner() {
     c.width = v.videoWidth; c.height = v.videoHeight;
     c.getContext("2d")!.drawImage(v, 0, 0);
     stopCam();
+    // Set default corners first so image shows immediately
     setCorners(modeDefaultCorners(c.width, c.height, scannerMode));
     setCaptured(c);
+    setAutoDetected(false);
     setPhase("captured");
+
+    // Auto-detect asynchronously so UI renders first
+    if (scannerMode !== "qr") {
+      setDetecting(true);
+      setTimeout(() => {
+        try {
+          const detected = scannerMode === "id"
+            ? modeDefaultCorners(c.width, c.height, "id") // keep ratio-locked for ID
+            : autoDetectCorners(c);
+          // Trigger CSS transition by setting animating flag then updating corners
+          setAnimating(true);
+          setCorners(detected);
+          setAutoDetected(true);
+          setTimeout(() => setAnimating(false), 500);
+        } catch { /* keep default */ }
+        setDetecting(false);
+      }, 60); // 60ms: enough for React to paint the captured image first
+    }
   }, [stopCam, scannerMode]);
 
   const process = useCallback(async (overrideMode?: EnhanceMode) => {
@@ -531,6 +708,7 @@ export default function Scanner() {
   const reset = useCallback(() => {
     stopCam(); setCaptured(null); setResultUrl(null); setCorners(null);
     setQrResult(null); setCopied(false); setErr(null);
+    setDetecting(false); setAutoDetected(false); setAnimating(false);
     setMode(meta.defaultEnhance); setCamReady(false); setPhase("idle");
   }, [stopCam, meta.defaultEnhance]);
 
@@ -732,18 +910,42 @@ export default function Scanner() {
       {/* ── CAPTURED — corner adjustment ── */}
       {phase === "captured" && captured && corners && (
         <div className="flex flex-col">
-          {/* Instruction banner */}
-          <div className="bg-indigo-50 border-b border-indigo-100 px-4 py-2.5 text-center flex items-center justify-center gap-2 flex-wrap">
-            <p className="text-sm text-indigo-700 font-medium">
-              Drag the <span className="font-bold">blue circles</span> to align{" "}
-              {scannerMode === "id" ? "your ID card" : "the 4 corners of your document"}
-            </p>
-            {scannerMode === "id" && (
-              <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-700 text-xs font-semibold px-2 py-0.5 rounded-full border border-amber-200">
-                🔒 1.6:1 ratio locked
-              </span>
-            )}
-          </div>
+          {/* Status banner */}
+          {detecting ? (
+            <div className="bg-amber-50 border-b border-amber-100 px-4 py-2.5 flex items-center justify-center gap-2">
+              <Loader2 className="w-4 h-4 text-amber-500 animate-spin shrink-0" />
+              <p className="text-sm text-amber-700 font-medium">Detecting document edges…</p>
+            </div>
+          ) : (
+            <div className={`border-b px-4 py-2.5 flex items-center justify-center gap-2 flex-wrap transition-colors ${autoDetected ? "bg-green-50 border-green-100" : "bg-indigo-50 border-indigo-100"}`}>
+              {autoDetected && (
+                <span className="inline-flex items-center gap-1 bg-green-100 text-green-700 text-xs font-semibold px-2 py-0.5 rounded-full border border-green-200">
+                  <CheckCircle className="w-3 h-3" /> Auto-cropped
+                </span>
+              )}
+              <p className={`text-sm font-medium ${autoDetected ? "text-green-700" : "text-indigo-700"}`}>
+                Drag the <span className="font-bold">blue circles</span> to fine-tune{" "}
+                {scannerMode === "id" ? "your ID card" : "the crop area"}
+              </p>
+              {scannerMode === "id" && (
+                <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-700 text-xs font-semibold px-2 py-0.5 rounded-full border border-amber-200">
+                  🔒 1.6:1 ratio locked
+                </span>
+              )}
+              {autoDetected && scannerMode !== "id" && (
+                <button
+                  onClick={() => {
+                    setAnimating(true);
+                    setCorners(autoDetectCorners(captured));
+                    setTimeout(() => setAnimating(false), 500);
+                  }}
+                  className="text-xs text-green-600 underline hover:text-green-800 shrink-0"
+                >
+                  Re-detect
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Image + draggable corner handles */}
           <div
@@ -761,11 +963,19 @@ export default function Scanner() {
               draggable={false}
             />
 
+            {/* Detecting overlay shimmer */}
+            {detecting && (
+              <div className="absolute inset-0 bg-black/10 z-20 pointer-events-none flex items-center justify-center">
+                <div className="w-1/2 h-1/2 border-2 border-dashed border-amber-400/70 rounded animate-pulse" />
+              </div>
+            )}
+
             {/* Quad overlay */}
             <svg
               className="absolute inset-0 w-full h-full pointer-events-none"
               viewBox={`0 0 ${captured.width} ${captured.height}`}
               preserveAspectRatio="none"
+              style={{ transition: animating ? "all 0.4s ease" : "none" }}
             >
               <defs>
                 <mask id="quad-mask">
@@ -773,24 +983,25 @@ export default function Scanner() {
                   <polygon points={corners.map(c => `${c.x},${c.y}`).join(" ")} fill="black" />
                 </mask>
               </defs>
-              {/* Semi-transparent overlay outside the quad */}
               <rect width={captured.width} height={captured.height} fill="rgba(0,0,0,0.45)" mask="url(#quad-mask)" />
-              {/* Crop boundary */}
               <polygon
                 points={corners.map(c => `${c.x},${c.y}`).join(" ")}
-                fill="rgba(99,102,241,0.12)"
-                stroke="#6366f1"
+                fill={autoDetected ? "rgba(34,197,94,0.10)" : "rgba(99,102,241,0.12)"}
+                stroke={autoDetected ? "#22c55e" : "#6366f1"}
                 strokeWidth={Math.max(2, captured.width * 0.003)}
                 strokeDasharray={`${captured.width * 0.015} ${captured.width * 0.008}`}
               />
-              {/* Edge lines */}
               {corners.map((c, i) => {
                 const next = corners[(i + 1) % 4];
-                return <line key={i} x1={c.x} y1={c.y} x2={next.x} y2={next.y} stroke="#6366f1" strokeWidth={Math.max(1.5, captured.width * 0.002)} />;
+                return (
+                  <line key={i} x1={c.x} y1={c.y} x2={next.x} y2={next.y}
+                    stroke={autoDetected ? "#22c55e" : "#6366f1"}
+                    strokeWidth={Math.max(1.5, captured.width * 0.002)} />
+                );
               })}
             </svg>
 
-            {/* Corner handle dots */}
+            {/* Corner handle dots — CSS transition for smooth snap animation */}
             {corners.map((c, i) => (
               <div
                 key={i}
@@ -799,11 +1010,12 @@ export default function Scanner() {
                   left: `${(c.x / captured.width) * 100}%`,
                   top: `${(c.y / captured.height) * 100}%`,
                   transform: "translate(-50%, -50%)",
+                  transition: animating ? "left 0.4s cubic-bezier(0.34,1.56,0.64,1), top 0.4s cubic-bezier(0.34,1.56,0.64,1)" : "none",
                 }}
                 onPointerDown={e => onPtrDown(e, i)}
               >
                 <div className="w-10 h-10 rounded-full flex items-center justify-center bg-white/20">
-                  <div className="w-6 h-6 rounded-full bg-indigo-600 border-2 border-white shadow-lg" />
+                  <div className={`w-6 h-6 rounded-full border-2 border-white shadow-lg transition-colors ${autoDetected ? "bg-green-500" : "bg-indigo-600"}`} />
                 </div>
               </div>
             ))}
@@ -819,7 +1031,7 @@ export default function Scanner() {
               <Button variant="outline" onClick={reset} className="flex-1 gap-2">
                 <RefreshCcw className="w-4 h-4" />Retake
               </Button>
-              <Button onClick={() => process()} disabled={busy} className="flex-1 gap-2">
+              <Button onClick={() => process()} disabled={busy || detecting} className="flex-1 gap-2">
                 {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
                 {busy ? "Processing…" : "Apply & Crop"}
               </Button>
