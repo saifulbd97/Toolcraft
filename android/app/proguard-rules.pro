@@ -4,6 +4,6 @@
 -keepclassmembers class * extends android.webkit.WebChromeClient {
     public *;
 }
--keepclassmembers class com.toolcraft.sbd.** {
+-keepclassmembers class com.toolsono.sbd.** {
     public *;
 }
