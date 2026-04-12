@@ -1,17 +1,18 @@
 import { Link } from "wouter";
 import { motion } from "framer-motion";
-import { Layers, ImagePlus, FileImage, Scissors, FileArchive, ArrowLeft } from "lucide-react";
+import { Layers, ImagePlus, FileImage, Scissors, FileArchive, PenLine, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useTranslation } from "@/lib/i18n";
 
-const toolKeys = ["merge", "jpgToPdf", "pdfToJpg", "split", "compress"] as const;
+const toolKeys = ["merge", "jpgToPdf", "pdfToJpg", "split", "compress", "sign"] as const;
 
 const toolMeta = {
-  merge:    { icon: Layers,       href: "/pdf/merge",      color: "bg-indigo-500",  lightColor: "bg-indigo-50",  textColor: "text-indigo-600",  borderColor: "hover:border-indigo-200",  shadowColor: "hover:shadow-indigo-100" },
-  jpgToPdf: { icon: ImagePlus,    href: "/pdf/jpg-to-pdf", color: "bg-orange-500",  lightColor: "bg-orange-50",  textColor: "text-orange-600",  borderColor: "hover:border-orange-200",  shadowColor: "hover:shadow-orange-100" },
-  pdfToJpg: { icon: FileImage,    href: "/pdf/pdf-to-jpg", color: "bg-emerald-500", lightColor: "bg-emerald-50", textColor: "text-emerald-600", borderColor: "hover:border-emerald-200", shadowColor: "hover:shadow-emerald-100" },
-  split:    { icon: Scissors,     href: "/pdf/split",      color: "bg-purple-500",  lightColor: "bg-purple-50",  textColor: "text-purple-600",  borderColor: "hover:border-purple-200",  shadowColor: "hover:shadow-purple-100" },
-  compress: { icon: FileArchive,  href: "/pdf/compress",   color: "bg-sky-500",     lightColor: "bg-sky-50",     textColor: "text-sky-600",     borderColor: "hover:border-sky-200",     shadowColor: "hover:shadow-sky-100" },
+  merge:    { icon: Layers,      href: "/pdf/merge",      color: "bg-indigo-500",  lightColor: "bg-indigo-50",  textColor: "text-indigo-600",  borderColor: "hover:border-indigo-200",  shadowColor: "hover:shadow-indigo-100" },
+  jpgToPdf: { icon: ImagePlus,   href: "/pdf/jpg-to-pdf", color: "bg-orange-500",  lightColor: "bg-orange-50",  textColor: "text-orange-600",  borderColor: "hover:border-orange-200",  shadowColor: "hover:shadow-orange-100" },
+  pdfToJpg: { icon: FileImage,   href: "/pdf/pdf-to-jpg", color: "bg-emerald-500", lightColor: "bg-emerald-50", textColor: "text-emerald-600", borderColor: "hover:border-emerald-200", shadowColor: "hover:shadow-emerald-100" },
+  split:    { icon: Scissors,    href: "/pdf/split",      color: "bg-purple-500",  lightColor: "bg-purple-50",  textColor: "text-purple-600",  borderColor: "hover:border-purple-200",  shadowColor: "hover:shadow-purple-100" },
+  compress: { icon: FileArchive, href: "/pdf/compress",   color: "bg-sky-500",     lightColor: "bg-sky-50",     textColor: "text-sky-600",     borderColor: "hover:border-sky-200",     shadowColor: "hover:shadow-sky-100" },
+  sign:     { icon: PenLine,     href: "/pdf/sign",       color: "bg-rose-500",    lightColor: "bg-rose-50",    textColor: "text-rose-600",    borderColor: "hover:border-rose-200",    shadowColor: "hover:shadow-rose-100" },
 };
 
 const containerVariants = {
