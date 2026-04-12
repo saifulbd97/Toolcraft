@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 import {
-  ArrowLeft, Camera, CameraOff, CheckCircle, ClipboardCopy,
+  ArrowLeft, Camera, CameraOff, CheckCircle, ChevronLeft, ChevronRight, ClipboardCopy,
   ExternalLink, FileDown, FlipHorizontal, ImageIcon,
-  Loader2, QrCode, RefreshCcw, ScanLine,
+  Loader2, QrCode, RefreshCcw, ScanLine, Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -660,10 +660,17 @@ export default function Scanner() {
   const [qrResult, setQrResult] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // ID Card dual-side state
+  const [idSide, setIdSide] = useState<"front" | "back">("front");
+  const [idFrontUrl, setIdFrontUrl] = useState<string | null>(null);
+  const [idBackUrl, setIdBackUrl] = useState<string | null>(null);
+  const [idA4Modal, setIdA4Modal] = useState(false);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const qrTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
 
   // Load OpenCV silently in the background (for warp + enhance only)
   useEffect(() => { loadOpenCV(); }, []);
@@ -778,11 +785,29 @@ export default function Scanner() {
     try {
       const warped = warpImage(captured, corners);
       const enhanced = enhance(warped, m);
-      setResultUrl(enhanced.toDataURL("image/jpeg", 0.95));
-      setPhase("result");
+      const url = enhanced.toDataURL("image/jpeg", 0.95);
+
+      if (scannerMode === "id") {
+        if (idSide === "front") {
+          setIdFrontUrl(url);
+          setResultUrl(url);
+          // Reset capture state for back side
+          setCaptured(null); setCorners(null);
+          setAutoDetected(false); setDetecting(false);
+          setIdSide("back");
+          setPhase("idle");
+        } else {
+          setIdBackUrl(url);
+          setResultUrl(url);
+          setPhase("result");
+        }
+      } else {
+        setResultUrl(url);
+        setPhase("result");
+      }
     } catch { setErr("Processing failed — please try again."); }
     setBusy(false);
-  }, [captured, corners, mode]);
+  }, [captured, corners, mode, scannerMode, idSide]);
 
   const reprocess = useCallback(async (m: EnhanceMode) => {
     if (!captured || !corners) return;
@@ -821,11 +846,96 @@ export default function Scanner() {
     setBusy(false);
   }, [resultUrl]);
 
+  const downloadA4Pdf = useCallback(async (layout: "front-back" | "single-front" | "single-back" | "wallet") => {
+    setBusy(true);
+    try {
+      const { PDFDocument, rgb } = await import("pdf-lib");
+      const pdf = await PDFDocument.create();
+      const A4W = 595.28, A4H = 841.89;
+      const margin = 36;
+
+      const toBytes = (url: string) =>
+        Uint8Array.from(atob(url.split(",")[1]), c => c.charCodeAt(0));
+
+      const embedImg = async (url: string) => {
+        const bytes = toBytes(url);
+        try { return await pdf.embedJpg(bytes); } catch { return await pdf.embedPng(bytes); }
+      };
+
+      if (layout === "front-back" && idFrontUrl && idBackUrl) {
+        const page = pdf.addPage([A4W, A4H]);
+        const frontImg = await embedImg(idFrontUrl);
+        const backImg  = await embedImg(idBackUrl);
+        const usableW = A4W - 2 * margin;
+        const slotH = (A4H - 3 * margin) / 2;
+
+        // Front — top slot (PDF y=0 is bottom)
+        const fRatio = frontImg.width / frontImg.height;
+        let fw = usableW, fh = fw / fRatio;
+        if (fh > slotH) { fh = slotH; fw = fh * fRatio; }
+        const fx = (A4W - fw) / 2;
+        const fy = A4H - margin - fh;
+        page.drawImage(frontImg, { x: fx, y: fy, width: fw, height: fh });
+        page.drawText("FRONT SIDE", { x: fx, y: fy + fh + 6, size: 8, color: rgb(0.5, 0.5, 0.5) });
+
+        // Back — bottom slot
+        const bRatio = backImg.width / backImg.height;
+        let bw = usableW, bh = bw / bRatio;
+        if (bh > slotH) { bh = slotH; bw = bh * bRatio; }
+        const bx = (A4W - bw) / 2;
+        const by = margin;
+        page.drawImage(backImg, { x: bx, y: by, width: bw, height: bh });
+        page.drawText("BACK SIDE", { x: bx, y: by + bh + 6, size: 8, color: rgb(0.5, 0.5, 0.5) });
+      } else if (layout === "wallet") {
+        // 4 wallet-size copies on A4 (2 columns × 2 rows)
+        const urls = [idFrontUrl, idBackUrl, idFrontUrl, idBackUrl].filter(Boolean) as string[];
+        const page = pdf.addPage([A4W, A4H]);
+        const cols = 2, rows = 2;
+        const cw = (A4W - (cols + 1) * margin) / cols;
+        const ch = (A4H - (rows + 1) * margin) / rows;
+        for (let i = 0; i < Math.min(urls.length, 4); i++) {
+          const img = await embedImg(urls[i]);
+          const col = i % cols, row = Math.floor(i / cols);
+          const ratio = img.width / img.height;
+          let iw = cw, ih = iw / ratio;
+          if (ih > ch) { ih = ch; iw = ih * ratio; }
+          const ix = margin + col * (cw + margin) + (cw - iw) / 2;
+          const iy = A4H - margin - (row + 1) * ch - row * margin + (ch - ih) / 2;
+          page.drawImage(img, { x: ix, y: iy, width: iw, height: ih });
+          const labels = ["Front", "Back", "Front", "Back"];
+          page.drawText(labels[i], { x: ix, y: iy - 10, size: 7, color: rgb(0.5, 0.5, 0.5) });
+        }
+      } else {
+        // Single card centered on A4
+        const url = layout === "single-back" ? idBackUrl : (idFrontUrl ?? resultUrl);
+        if (!url) { setBusy(false); return; }
+        const page = pdf.addPage([A4W, A4H]);
+        const img = await embedImg(url);
+        const usableW = A4W - 2 * margin;
+        const usableH = A4H - 2 * margin;
+        const ratio = img.width / img.height;
+        let w = usableW, h = w / ratio;
+        if (h > usableH) { h = usableH; w = h * ratio; }
+        page.drawImage(img, { x: (A4W - w) / 2, y: (A4H - h) / 2, width: w, height: h });
+      }
+
+      const blob = new Blob([await pdf.save()], { type: "application/pdf" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `id-card-a4-${Date.now()}.pdf`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch { setErr("PDF export failed."); }
+    setBusy(false);
+  }, [idFrontUrl, idBackUrl, resultUrl]);
+
   const reset = useCallback(() => {
     stopCam(); setCaptured(null); setResultUrl(null); setCorners(null);
     setQrResult(null); setCopied(false); setErr(null);
     setDetecting(false); setAutoDetected(false); setAnimating(false);
     setMode(meta.defaultEnhance); setCamReady(false); setPhase("idle");
+    // Reset ID card state
+    setIdSide("front"); setIdFrontUrl(null); setIdBackUrl(null); setIdA4Modal(false);
   }, [stopCam, meta.defaultEnhance]);
 
 
@@ -839,6 +949,40 @@ export default function Scanner() {
     const next = facing === "environment" ? "user" : "environment";
     setFacing(next); startCam(next);
   }, [facing, startCam]);
+
+  const handleGalleryUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = ""; // allow re-selecting same file
+    setErr(null);
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      c.getContext("2d")!.drawImage(img, 0, 0);
+      URL.revokeObjectURL(objectUrl);
+      setCorners(modeDefaultCorners(c.width, c.height, scannerMode));
+      setCaptured(c); setAutoDetected(false); setPhase("captured");
+      if (scannerMode !== "qr") {
+        setDetecting(true);
+        setTimeout(async () => {
+          try {
+            const detected = scannerMode === "id"
+              ? modeDefaultCorners(c.width, c.height, "id")
+              : await detectDocumentCorners(c);
+            setAnimating(true);
+            setCorners(detected);
+            setAutoDetected(true);
+            setTimeout(() => setAnimating(false), 500);
+          } catch { /* keep defaults */ }
+          setDetecting(false);
+        }, 60);
+      }
+    };
+    img.onerror = () => { URL.revokeObjectURL(objectUrl); setErr("Failed to load image — please try another file."); };
+    img.src = objectUrl;
+  }, [scannerMode]);
 
   // Corner dragging
   const onPtrDown = (e: React.PointerEvent, idx: number) => {
@@ -912,8 +1056,17 @@ export default function Scanner() {
         </div>
       )}
 
+      {/* Hidden gallery file input (shared across all modes) */}
+      <input
+        ref={galleryInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleGalleryUpload}
+      />
+
       {/* ── IDLE ── */}
-      {phase === "idle" && (
+      {phase === "idle" && scannerMode !== "id" && (
         <div className="flex flex-col items-center justify-center min-h-[72vh] px-6 text-center gap-6">
           <div className="w-20 h-20 rounded-2xl bg-amber-50 border border-amber-100 flex items-center justify-center">
             {scannerMode === "qr"
@@ -925,8 +1078,6 @@ export default function Scanner() {
             <p className="text-muted-foreground max-w-xs text-sm leading-relaxed">
               {scannerMode === "qr"
                 ? "Point your camera at any QR code to instantly decode it."
-                : scannerMode === "id"
-                ? "Place your ID card on a flat surface, capture it, then drag the corners to align."
                 : scannerMode === "receipt"
                 ? "Hold the receipt upright, capture it, then drag the corners to align."
                 : "Capture your document then drag the 4 blue corners to align the boundary."}
@@ -945,9 +1096,119 @@ export default function Scanner() {
               </a>
             ))}
           </div>
-          <Button onClick={() => startCam(facing)} size="lg" className="gap-2">
-            <Camera className="w-5 h-5" /> Start Camera
-          </Button>
+          <div className="flex flex-col sm:flex-row gap-3 w-full max-w-xs">
+            <Button onClick={() => startCam(facing)} size="lg" className="flex-1 gap-2">
+              <Camera className="w-5 h-5" /> Use Camera
+            </Button>
+            <Button
+              variant="outline" size="lg"
+              className="flex-1 gap-2"
+              onClick={() => galleryInputRef.current?.click()}
+            >
+              <Upload className="w-5 h-5" /> Upload Image
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* ── IDLE — ID Card mode (dual-side) ── */}
+      {phase === "idle" && scannerMode === "id" && (
+        <div className="flex flex-col items-center justify-center min-h-[72vh] px-4 gap-0">
+          {/* Mode selector pills */}
+          <div className="flex flex-wrap gap-2 justify-center mb-5">
+            {(["document", "id", "receipt", "qr"] as ScannerMode[]).map(m => (
+              <a key={m} href={`?mode=${m}`}
+                className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+                  m === scannerMode
+                    ? "bg-amber-500 text-white border-amber-500"
+                    : "bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
+                }`}>
+                {MODE_META[m].label}
+              </a>
+            ))}
+          </div>
+
+          {/* Step indicator */}
+          <div className="flex items-center gap-3 mb-6">
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold transition-colors ${
+              idFrontUrl ? "bg-green-100 text-green-700 border border-green-200" :
+              idSide === "front" ? "bg-indigo-600 text-white" : "bg-muted text-muted-foreground"
+            }`}>
+              {idFrontUrl ? <CheckCircle className="w-3 h-3" /> : <span>1</span>}
+              Front Side
+            </div>
+            <ChevronRight className="w-4 h-4 text-muted-foreground" />
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold transition-colors ${
+              idBackUrl ? "bg-green-100 text-green-700 border border-green-200" :
+              idSide === "back" ? "bg-indigo-600 text-white" : "bg-muted text-muted-foreground"
+            }`}>
+              {idBackUrl ? <CheckCircle className="w-3 h-3" /> : <span>2</span>}
+              Back Side
+            </div>
+          </div>
+
+          {/* Side title */}
+          <div className="text-center mb-4">
+            <h1 className="text-xl font-bold mb-1">
+              {idSide === "front" ? "Capture Front Side" : "Capture Back Side"}
+            </h1>
+            <p className="text-sm text-muted-foreground max-w-xs">
+              {idSide === "front"
+                ? "Capture or upload the front of your ID card"
+                : "Now capture or upload the back of your ID card"}
+            </p>
+          </div>
+
+          {/* Front side thumbnail if done */}
+          {idSide === "back" && idFrontUrl && (
+            <div className="w-full max-w-xs mb-4 p-3 rounded-xl border border-border bg-muted/30">
+              <p className="text-xs text-muted-foreground mb-2 font-medium">✓ Front side captured</p>
+              <img
+                src={idFrontUrl}
+                alt="Front side"
+                className="w-full h-auto rounded-lg border border-border shadow-sm"
+                style={{ aspectRatio: "85.6/54", objectFit: "cover" }}
+              />
+              <button
+                onClick={() => { setIdFrontUrl(null); setIdSide("front"); }}
+                className="mt-2 text-xs text-muted-foreground hover:text-foreground underline w-full text-center"
+              >
+                Retake front
+              </button>
+            </div>
+          )}
+
+          {/* ID card outline illustration */}
+          <div className="w-full max-w-xs mb-5 rounded-xl border-2 border-dashed border-amber-300 bg-amber-50/50 flex items-center justify-center"
+               style={{ aspectRatio: "85.6/54" }}>
+            <div className="text-center text-amber-600 p-4">
+              <ScanLine className="w-8 h-8 mx-auto mb-1 opacity-60" />
+              <p className="text-xs opacity-70">
+                {idSide === "front" ? "Front of ID card" : "Back of ID card"}
+              </p>
+            </div>
+          </div>
+
+          {/* Capture buttons */}
+          <div className="flex flex-col gap-3 w-full max-w-xs">
+            <Button onClick={() => startCam(facing)} size="lg" className="gap-2">
+              <Camera className="w-5 h-5" /> Use Camera
+            </Button>
+            <Button
+              variant="outline" size="lg" className="gap-2"
+              onClick={() => galleryInputRef.current?.click()}
+            >
+              <Upload className="w-5 h-5" /> Upload from Gallery
+            </Button>
+            {idSide === "back" && (
+              <button
+                onClick={() => { setPhase("result"); }}
+                className="text-sm text-muted-foreground hover:text-foreground underline mt-1"
+              >
+                Skip back side — view front only
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -1190,8 +1451,8 @@ export default function Scanner() {
         </div>
       )}
 
-      {/* ── RESULT — Document / ID / Receipt ── */}
-      {phase === "result" && scannerMode !== "qr" && (
+      {/* ── RESULT — Document / Receipt ── */}
+      {phase === "result" && scannerMode !== "qr" && scannerMode !== "id" && (
         <div className="flex flex-col items-center px-4 py-6 gap-5 max-w-lg mx-auto w-full">
           <div className="w-full rounded-xl overflow-hidden border border-border shadow-md bg-white">
             {busy
@@ -1219,6 +1480,126 @@ export default function Scanner() {
           <Button variant="ghost" onClick={reset} className="gap-2 text-muted-foreground">
             <RefreshCcw className="w-4 h-4" /> Scan Another
           </Button>
+        </div>
+      )}
+
+      {/* ── RESULT — ID Card ── */}
+      {phase === "result" && scannerMode === "id" && (
+        <div className="flex flex-col items-center px-4 py-6 gap-5 max-w-lg mx-auto w-full">
+
+          {/* Success header */}
+          <div className="flex items-center gap-2 text-green-600">
+            <CheckCircle className="w-5 h-5" />
+            <span className="font-semibold text-sm">
+              {idFrontUrl && idBackUrl ? "Both sides captured!" : "ID Card captured!"}
+            </span>
+          </div>
+
+          {/* ID Card previews */}
+          {idFrontUrl && idBackUrl ? (
+            <div className="w-full space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-xs text-muted-foreground font-medium mb-1.5 text-center">Front Side</p>
+                  <div className="rounded-lg overflow-hidden border border-border shadow-sm bg-white">
+                    <img src={idFrontUrl} alt="ID Front" className="w-full h-auto" />
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground font-medium mb-1.5 text-center">Back Side</p>
+                  <div className="rounded-lg overflow-hidden border border-border shadow-sm bg-white">
+                    <img src={idBackUrl} alt="ID Back" className="w-full h-auto" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="w-full">
+              <p className="text-xs text-muted-foreground font-medium mb-1.5 text-center">
+                {idFrontUrl ? "Front Side" : "Back Side"}
+              </p>
+              <div className="rounded-xl overflow-hidden border border-border shadow-md bg-white">
+                <img src={idFrontUrl ?? resultUrl ?? ""} alt="ID Card" className="w-full h-auto" />
+              </div>
+            </div>
+          )}
+
+          {/* Download — Individual sides */}
+          <div className="w-full space-y-2">
+            <p className="text-xs text-muted-foreground font-medium text-center">Download as image</p>
+            <div className="flex gap-2">
+              {idFrontUrl && (
+                <button
+                  onClick={() => { const a = document.createElement("a"); a.href = idFrontUrl; a.download = `id-front-${Date.now()}.jpg`; a.click(); }}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-border text-sm font-medium hover:bg-muted transition-colors"
+                >
+                  <ImageIcon className="w-4 h-4" /> Front JPG
+                </button>
+              )}
+              {idBackUrl && (
+                <button
+                  onClick={() => { const a = document.createElement("a"); a.href = idBackUrl; a.download = `id-back-${Date.now()}.jpg`; a.click(); }}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-border text-sm font-medium hover:bg-muted transition-colors"
+                >
+                  <ImageIcon className="w-4 h-4" /> Back JPG
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Download — A4 PDF options */}
+          <div className="w-full space-y-2">
+            <p className="text-xs text-muted-foreground font-medium text-center">Download as A4 PDF</p>
+            <div className="flex flex-col gap-2">
+              {idFrontUrl && idBackUrl && (
+                <Button
+                  onClick={() => downloadA4Pdf("front-back")}
+                  disabled={busy}
+                  className="w-full gap-2"
+                >
+                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
+                  Front + Back on A4 (1 page)
+                </Button>
+              )}
+              {idFrontUrl && idBackUrl && (
+                <Button
+                  variant="outline"
+                  onClick={() => downloadA4Pdf("wallet")}
+                  disabled={busy}
+                  className="w-full gap-2"
+                >
+                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
+                  4 Wallet Copies on A4 (cut & keep)
+                </Button>
+              )}
+              {!idBackUrl && idFrontUrl && (
+                <Button
+                  onClick={() => downloadA4Pdf("single-front")}
+                  disabled={busy}
+                  className="w-full gap-2"
+                >
+                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
+                  Download A4 PDF
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {/* Action row */}
+          <div className="flex gap-3 w-full pt-1">
+            {!idBackUrl && idFrontUrl && (
+              <Button
+                variant="outline"
+                onClick={() => { setIdSide("back"); setPhase("idle"); }}
+                className="flex-1 gap-2"
+              >
+                <ChevronLeft className="w-4 h-4" /> Add Back Side
+              </Button>
+            )}
+            <Button variant="ghost" onClick={reset} className="flex-1 gap-2 text-muted-foreground">
+              <RefreshCcw className="w-4 h-4" /> Scan Another
+            </Button>
+          </div>
         </div>
       )}
 
