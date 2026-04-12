@@ -182,6 +182,122 @@ function autoDetectCorners(canvas: HTMLCanvasElement): Corners {
   ];
 }
 
+// ─── Corner ordering: TL → TR → BR → BL ──────────────────────────────────────
+function orderCorners(pts: Pt[]): Corners {
+  // TL = min x+y, BR = max x+y
+  const sorted = [...pts].sort((a, b) => (a.x + a.y) - (b.x + b.y));
+  const tl = sorted[0];
+  const br = sorted[3];
+  // Remaining two: larger x = TR, smaller x = BL
+  const rem = [sorted[1], sorted[2]].sort((a, b) => a.x - b.x);
+  return [tl, rem[1], br, rem[0]];
+}
+
+// ─── OpenCV-based document detection (CamScanner-style) ──────────────────────
+// Pipeline: grayscale → blur → Canny → dilate → findContours → largest quad
+// Tries multiple Canny threshold pairs to handle varying contrast conditions.
+// Async because it awaits the OpenCV WASM load (already started on mount).
+async function autoDetectCornersWithCV(canvas: HTMLCanvasElement): Promise<Corners | null> {
+  await loadOpenCV();
+  const cv = (window as any).cv;
+  if (!cv?.Mat) return null;
+
+  // Work on a downscaled copy (800px max) for speed
+  const MAX = 800;
+  const scale = Math.min(1, MAX / Math.max(canvas.width, canvas.height));
+  const tw = Math.round(canvas.width * scale);
+  const th = Math.round(canvas.height * scale);
+  let src = canvas as HTMLCanvasElement;
+  if (scale < 1) {
+    src = document.createElement("canvas");
+    src.width = tw; src.height = th;
+    src.getContext("2d")!.drawImage(canvas, 0, 0, tw, th);
+  }
+
+  const mats: any[] = [];
+  const t = <T,>(m: T): T => { mats.push(m); return m; };
+  const cleanup = () => { for (const m of mats) { try { m.delete(); } catch {} } };
+
+  try {
+    const mat = t(cv.imread(src));
+
+    // Grayscale
+    const gray = t(new cv.Mat());
+    cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
+
+    // Gaussian blur — removes noise before edge detection
+    const blurred = t(new cv.Mat());
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+
+    // Try progressively lower Canny thresholds (high-contrast first)
+    const threshPairs: [number, number][] = [[75, 200], [50, 150], [30, 90], [15, 50]];
+    const minArea = tw * th * 0.08; // ignore contours < 8% of frame
+
+    for (const [low, high] of threshPairs) {
+      const edges = t(new cv.Mat());
+      cv.Canny(blurred, edges, low, high);
+
+      // Dilate to close small gaps in document border
+      const kernel = t(cv.Mat.ones(3, 3, cv.CV_8U));
+      const dilated = t(new cv.Mat());
+      cv.dilate(edges, dilated, kernel);
+
+      const contours = t(new cv.MatVector());
+      const hierarchy = t(new cv.Mat());
+      cv.findContours(dilated, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+
+      let bestQuad: Pt[] | null = null;
+      let bestArea = 0;
+
+      for (let i = 0; i < contours.size(); i++) {
+        const c = contours.get(i);
+        const area = cv.contourArea(c);
+        if (area < minArea) { c.delete(); continue; }
+
+        const peri = cv.arcLength(c, true);
+        const approx = new cv.Mat();
+        cv.approxPolyDP(c, approx, 0.02 * peri, true);
+
+        if (approx.rows === 4 && cv.isContourConvex(approx) && area > bestArea) {
+          bestArea = area;
+          const d = approx.data32S;
+          bestQuad = [
+            { x: d[0], y: d[1] }, { x: d[2], y: d[3] },
+            { x: d[4], y: d[5] }, { x: d[6], y: d[7] },
+          ];
+        }
+        approx.delete();
+        c.delete();
+      }
+
+      if (bestQuad) {
+        const ordered = orderCorners(bestQuad);
+        const sx = canvas.width / tw;
+        const sy = canvas.height / th;
+        const result = ordered.map(p => ({
+          x: Math.max(0, Math.min(canvas.width,  p.x * sx)),
+          y: Math.max(0, Math.min(canvas.height, p.y * sy)),
+        })) as Corners;
+        cleanup();
+        return result;
+      }
+    }
+
+    cleanup();
+    return null; // trigger fallback
+  } catch (e) {
+    console.warn("[AutoCrop CV]", e);
+    cleanup();
+    return null;
+  }
+}
+
+// ─── Master auto-detect: CV first, pure-JS fallback ──────────────────────────
+async function detectDocumentCorners(canvas: HTMLCanvasElement): Promise<Corners> {
+  const cv = await autoDetectCornersWithCV(canvas);
+  return cv ?? autoDetectCorners(canvas);
+}
+
 // ID card ISO 7810 ratio: 85.60 × 53.98 mm ≈ 1.586
 const ID_RATIO = 85.60 / 53.98;
 
@@ -638,19 +754,19 @@ export default function Scanner() {
     // Auto-detect asynchronously so UI renders first
     if (scannerMode !== "qr") {
       setDetecting(true);
-      setTimeout(() => {
+      // 60ms: enough for React to paint the captured image before heavy CV work
+      setTimeout(async () => {
         try {
           const detected = scannerMode === "id"
-            ? modeDefaultCorners(c.width, c.height, "id") // keep ratio-locked for ID
-            : autoDetectCorners(c);
-          // Trigger CSS transition by setting animating flag then updating corners
+            ? modeDefaultCorners(c.width, c.height, "id") // keep aspect-ratio-locked for ID
+            : await detectDocumentCorners(c);             // OpenCV → pure-JS fallback
           setAnimating(true);
           setCorners(detected);
           setAutoDetected(true);
           setTimeout(() => setAnimating(false), 500);
-        } catch { /* keep default */ }
+        } catch { /* keep default corners */ }
         setDetecting(false);
-      }, 60); // 60ms: enough for React to paint the captured image first
+      }, 60);
     }
   }, [stopCam, scannerMode]);
 
@@ -934,10 +1050,15 @@ export default function Scanner() {
               )}
               {autoDetected && scannerMode !== "id" && (
                 <button
-                  onClick={() => {
-                    setAnimating(true);
-                    setCorners(autoDetectCorners(captured));
-                    setTimeout(() => setAnimating(false), 500);
+                  onClick={async () => {
+                    setDetecting(true);
+                    try {
+                      const detected = await detectDocumentCorners(captured);
+                      setAnimating(true);
+                      setCorners(detected);
+                      setTimeout(() => setAnimating(false), 500);
+                    } catch { /* keep */ }
+                    setDetecting(false);
                   }}
                   className="text-xs text-green-600 underline hover:text-green-800 shrink-0"
                 >
