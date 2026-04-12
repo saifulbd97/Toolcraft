@@ -43,7 +43,7 @@ export default function About() {
         <h1 className="text-2xl font-bold text-foreground tracking-tight mb-1">
           Mohammad Saiful Islam
         </h1>
-        <p className="text-sm text-indigo-500 font-medium mb-6">Creator of Toolcraft</p>
+        <p className="text-sm text-indigo-500 font-medium mb-6">Creator of Toolsono</p>
 
         <div className="h-px bg-border mx-auto w-16 mb-6" />
 
