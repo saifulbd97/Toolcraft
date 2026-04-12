@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Toolcraft"
+rootProject.name = "Toolsono"
 include(":app")
