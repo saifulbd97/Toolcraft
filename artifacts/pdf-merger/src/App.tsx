@@ -15,6 +15,7 @@ import Compress from "@/pages/compress";
 import About from "@/pages/about";
 import Scanner from "@/pages/scanner";
 import BgRemover from "@/pages/bg-remover";
+import PdfSign from "@/pages/pdf-sign";
 
 const queryClient = new QueryClient();
 
@@ -67,6 +68,7 @@ function Router() {
       <Route path="/pdf/split" component={Split} />
       <Route path="/pdf/compress" component={Compress} />
       <Route path="/bg-remover" component={BgRemover} />
+      <Route path="/pdf/sign" component={PdfSign} />
       <Route component={NotFound} />
     </Switch>
   );
