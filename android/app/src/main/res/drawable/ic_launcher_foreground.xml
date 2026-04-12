@@ -4,7 +4,7 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- White "T" letter matching Toolcraft brand -->
+    <!-- White "T" letter (legacy foreground, replaced by ic_launcher_logo) -->
     <path
         android:fillColor="#FFFFFF"
         android:pathData="M18,28 L90,28 L90,43 L62,43 L62,82 L46,82 L46,43 L18,43 Z" />
