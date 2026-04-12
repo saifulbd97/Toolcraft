@@ -9,11 +9,8 @@ import { Button } from "@/components/ui/button";
 import { PDFDocument } from "pdf-lib";
 import * as pdfjsLib from "pdfjs-dist";
 
-// Configure PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.min.mjs",
-  import.meta.url
-).href;
+// Configure PDF.js worker — use CDN so the worker loads correctly in all environments
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 type Step = "upload" | "signature" | "place";
 type SigMode = "draw" | "type" | "upload";
