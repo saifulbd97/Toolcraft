@@ -141,9 +141,8 @@ function autoDetectCorners(canvas: HTMLCanvasElement): Corners {
     if (p.x - p.y < bl.x - bl.y) bl = p;
   }
 
-  // Step 7: confidence — quad area must be ≥ 10% of frame
-  if (quadArea(tl, tr, br, bl) < tw * th * 0.10)
-    return defaultCorners(canvas.width, canvas.height);
+  // Step 7: confidence — quad area must be ≥ 10% of frame, else not confident
+  if (quadArea(tl, tr, br, bl) < tw * th * 0.10) return null;
 
   const sx = canvas.width / tw;
   const sy = canvas.height / th;
@@ -305,10 +304,18 @@ async function autoDetectCornersWithCV(canvas: HTMLCanvasElement): Promise<Corne
   }
 }
 
-// ─── Master auto-detect: CV first, pure-JS fallback ──────────────────────────
-async function detectDocumentCorners(canvas: HTMLCanvasElement): Promise<Corners> {
-  const cv = await autoDetectCornersWithCV(canvas);
-  return cv ?? autoDetectCorners(canvas);
+// ─── Master auto-detect: CV first, pure-JS fallback, fallback to default ─────
+// Returns { corners, confident } so callers can show an accurate status badge.
+async function detectDocumentCorners(
+  canvas: HTMLCanvasElement
+): Promise<{ corners: Corners; confident: boolean }> {
+  const cvResult = await autoDetectCornersWithCV(canvas);
+  if (cvResult) return { corners: cvResult, confident: true };
+
+  const jsResult = autoDetectCorners(canvas);
+  if (jsResult) return { corners: jsResult, confident: true };
+
+  return { corners: defaultCorners(canvas.width, canvas.height), confident: false };
 }
 
 // ID card ISO 7810 ratio: 85.60 × 53.98 mm ≈ 1.586
@@ -684,7 +691,8 @@ export default function Scanner() {
   const streamRef = useRef<MediaStream | null>(null);
   const qrTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const liveCanvasRef = useRef<HTMLCanvasElement>(null);
-  const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const liveDetectRef = useRef<{ corners: Corners; ts: number; tw: number; th: number } | null>(null);
+  const liveAnimRef   = useRef<number>(0);
   const galleryInputRef = useRef<HTMLInputElement>(null);
 
   // Load OpenCV silently in the background (for warp + enhance only)
@@ -718,25 +726,15 @@ export default function Scanner() {
     return () => video.removeEventListener("loadedmetadata", onMeta);
   }, [phase]);
 
-  // Live corner overlay — runs during camera preview (non-QR modes)
+  // Live corner overlay — detection interval + rAF animation loop
   useEffect(() => {
     if (!camReady || scannerMode === "qr" || phase !== "scanning") return;
-    const overlayCanvas = liveCanvasRef.current;
-    if (!overlayCanvas) return;
 
-    const timer = setInterval(() => {
+    // Detection runs every 800ms (cheap); rendering runs every frame (smooth)
+    const detectTimer = setInterval(() => {
       const v = videoRef.current;
       if (!v || !v.videoWidth) return;
 
-      // Size canvas to match its CSS-rendered area
-      const rect = overlayCanvas.getBoundingClientRect();
-      if (rect.width === 0) return;
-      overlayCanvas.width  = rect.width;
-      overlayCanvas.height = rect.height;
-      const ctx = overlayCanvas.getContext("2d")!;
-      ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-
-      // Grab a tiny frame for fast detection
       const MAX = 320;
       const tscale = Math.min(1, MAX / Math.max(v.videoWidth, v.videoHeight));
       const tw = Math.round(v.videoWidth  * tscale);
@@ -745,47 +743,79 @@ export default function Scanner() {
       tmp.width = tw; tmp.height = th;
       tmp.getContext("2d")!.drawImage(v, 0, 0, tw, th);
 
-      const detected = autoDetectCorners(tmp);
-
-      // Confidence: if corners barely moved from defaults, skip drawing
-      const def = modeDefaultCorners(tw, th, scannerMode);
-      const maxDiff = Math.max(...detected.map((c, i) =>
-        Math.hypot(c.x - def[i].x, c.y - def[i].y)
-      ));
-      if (maxDiff < tw * 0.06) return;
-
-      // Map thumbnail coords → canvas display coords
-      const mx = (c: Pt) => ({ x: (c.x / tw) * overlayCanvas.width, y: (c.y / th) * overlayCanvas.height });
-      const pts = detected.map(mx);
-
-      // Draw quad fill
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      pts.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
-      ctx.closePath();
-      ctx.fillStyle   = "rgba(34,197,94,0.15)";
-      ctx.strokeStyle = "rgba(34,197,94,0.90)";
-      ctx.lineWidth   = 2;
-      ctx.fill();
-      ctx.stroke();
-
-      // Draw corner dots
-      pts.forEach(p => {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
-        ctx.fillStyle   = "#22c55e";
-        ctx.fill();
-        ctx.strokeStyle = "white";
-        ctx.lineWidth   = 1.5;
-        ctx.stroke();
-      });
+      // autoDetectCorners returns null when not confident (already filtered)
+      const result = autoDetectCorners(tmp);
+      if (result) {
+        liveDetectRef.current = { corners: result, ts: Date.now(), tw, th };
+      } else {
+        // Let the last detection linger for 1.6s then clear
+        if (liveDetectRef.current && Date.now() - liveDetectRef.current.ts > 1600)
+          liveDetectRef.current = null;
+      }
     }, 800);
 
-    liveTimerRef.current = timer;
+    // Animation loop: draws animated overlay every frame
+    const drawFrame = () => {
+      const canvas = liveCanvasRef.current;
+      if (!canvas) { liveAnimRef.current = requestAnimationFrame(drawFrame); return; }
+
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0) {
+        if (canvas.width !== Math.round(rect.width) || canvas.height !== Math.round(rect.height)) {
+          canvas.width = Math.round(rect.width);
+          canvas.height = Math.round(rect.height);
+        }
+        const ctx = canvas.getContext("2d")!;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const info = liveDetectRef.current;
+        if (info) {
+          const age   = Date.now() - info.ts;
+          const flash = age < 400;
+          const fillA = flash ? 0.22 + 0.12 * Math.sin((age / 400) * Math.PI) : 0.13;
+          const lineW = flash ? 3 : 2;
+          const stroke = flash ? "rgba(34,197,94,0.95)" : "rgba(34,197,94,0.80)";
+
+          // Map thumbnail → canvas display
+          const mx = (c: Pt) => ({
+            x: (c.x / info.tw) * canvas.width,
+            y: (c.y / info.th) * canvas.height,
+          });
+          const pts = info.corners.map(mx);
+
+          // Quad
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x, pts[0].y);
+          pts.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
+          ctx.closePath();
+          ctx.fillStyle   = `rgba(34,197,94,${fillA})`;
+          ctx.strokeStyle = stroke;
+          ctx.lineWidth   = lineW;
+          ctx.fill();
+          ctx.stroke();
+
+          // Animated corner dots — pulse radius with sin
+          const t = (Date.now() % 1200) / 1200;
+          const dotR = 5.5 + Math.sin(t * Math.PI * 2) * 2;
+          pts.forEach(p => {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, dotR, 0, Math.PI * 2);
+            ctx.fillStyle   = flash ? "#4ade80" : "#22c55e";
+            ctx.fill();
+            ctx.strokeStyle = "white";
+            ctx.lineWidth   = 1.5;
+            ctx.stroke();
+          });
+        }
+      }
+      liveAnimRef.current = requestAnimationFrame(drawFrame);
+    };
+    liveAnimRef.current = requestAnimationFrame(drawFrame);
+
     return () => {
-      clearInterval(timer);
-      liveTimerRef.current = null;
-      // Clear the overlay when effect tears down
+      clearInterval(detectTimer);
+      cancelAnimationFrame(liveAnimRef.current);
+      liveDetectRef.current = null;
       const c = liveCanvasRef.current;
       if (c) c.getContext("2d")?.clearRect(0, 0, c.width, c.height);
     };
@@ -852,13 +882,17 @@ export default function Scanner() {
       // 60ms: enough for React to paint the captured image before heavy CV work
       setTimeout(async () => {
         try {
-          const detected = scannerMode === "id"
-            ? modeDefaultCorners(c.width, c.height, "id") // keep aspect-ratio-locked for ID
-            : await detectDocumentCorners(c);             // OpenCV → pure-JS fallback
-          setAnimating(true);
-          setCorners(detected);
-          setAutoDetected(true);
-          setTimeout(() => setAnimating(false), 500);
+          if (scannerMode === "id") {
+            setCorners(modeDefaultCorners(c.width, c.height, "id"));
+            // ID mode always uses locked aspect ratio — not counted as "auto-detected"
+            setAutoDetected(false);
+          } else {
+            const { corners: detected, confident } = await detectDocumentCorners(c);
+            setAnimating(true);
+            setCorners(detected);
+            setAutoDetected(confident);
+            setTimeout(() => setAnimating(false), 300);
+          }
         } catch { /* keep default corners */ }
         setDetecting(false);
       }, 60);
@@ -1056,13 +1090,16 @@ export default function Scanner() {
         setDetecting(true);
         setTimeout(async () => {
           try {
-            const detected = scannerMode === "id"
-              ? modeDefaultCorners(c.width, c.height, "id")
-              : await detectDocumentCorners(c);
-            setAnimating(true);
-            setCorners(detected);
-            setAutoDetected(true);
-            setTimeout(() => setAnimating(false), 500);
+            if (scannerMode === "id") {
+              setCorners(modeDefaultCorners(c.width, c.height, "id"));
+              setAutoDetected(false);
+            } else {
+              const { corners: detected, confident } = await detectDocumentCorners(c);
+              setAnimating(true);
+              setCorners(detected);
+              setAutoDetected(confident);
+              setTimeout(() => setAnimating(false), 300);
+            }
           } catch { /* keep defaults */ }
           setDetecting(false);
         }, 60);
@@ -1391,14 +1428,24 @@ export default function Scanner() {
               <p className="text-sm text-amber-700 font-medium">Detecting document edges…</p>
             </div>
           ) : (
-            <div className={`border-b px-4 py-2.5 flex items-center justify-center gap-2 flex-wrap transition-colors ${autoDetected ? "bg-green-50 border-green-100" : "bg-indigo-50 border-indigo-100"}`}>
-              {autoDetected && (
+            <div className={`border-b px-4 py-2.5 flex items-center justify-center gap-2 flex-wrap transition-colors ${
+              autoDetected ? "bg-green-50 border-green-100"
+              : scannerMode !== "id" ? "bg-amber-50 border-amber-100"
+              : "bg-indigo-50 border-indigo-100"
+            }`}>
+              {autoDetected ? (
                 <span className="inline-flex items-center gap-1 bg-green-100 text-green-700 text-xs font-semibold px-2 py-0.5 rounded-full border border-green-200">
-                  <CheckCircle className="w-3 h-3" /> Auto-cropped
+                  <CheckCircle className="w-3 h-3" /> Auto-detected ✓
                 </span>
-              )}
-              <p className={`text-sm font-medium ${autoDetected ? "text-green-700" : "text-indigo-700"}`}>
-                Drag the <span className="font-bold">blue circles</span> to fine-tune{" "}
+              ) : scannerMode !== "id" ? (
+                <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-700 text-xs font-semibold px-2 py-0.5 rounded-full border border-amber-200">
+                  Adjust manually
+                </span>
+              ) : null}
+              <p className={`text-sm font-medium ${
+                autoDetected ? "text-green-700" : scannerMode !== "id" ? "text-amber-700" : "text-indigo-700"
+              }`}>
+                Drag the <span className="font-bold">{autoDetected ? "green" : "blue"} circles</span> to fine-tune{" "}
                 {scannerMode === "id" ? "your ID card" : "the crop area"}
               </p>
               {scannerMode === "id" && (
@@ -1411,15 +1458,15 @@ export default function Scanner() {
                   onClick={async () => {
                     setDetecting(true);
                     try {
-                      const detected = await detectDocumentCorners(captured);
+                      const { corners: detected, confident } = await detectDocumentCorners(captured!);
                       setAnimating(true);
                       setCorners(detected);
-                      setAutoDetected(true);
-                      setTimeout(() => setAnimating(false), 500);
+                      setAutoDetected(confident);
+                      setTimeout(() => setAnimating(false), 300);
                     } catch { /* keep */ }
                     setDetecting(false);
                   }}
-                  className={`text-xs underline shrink-0 ${autoDetected ? "text-green-600 hover:text-green-800" : "text-indigo-600 hover:text-indigo-800"}`}
+                  className={`text-xs underline shrink-0 ${autoDetected ? "text-green-600 hover:text-green-800" : "text-amber-600 hover:text-amber-800"}`}
                 >
                   Re-detect
                 </button>
@@ -1490,7 +1537,7 @@ export default function Scanner() {
                   left: `${(c.x / captured.width) * 100}%`,
                   top: `${(c.y / captured.height) * 100}%`,
                   transform: "translate(-50%, -50%)",
-                  transition: animating ? "left 0.4s cubic-bezier(0.34,1.56,0.64,1), top 0.4s cubic-bezier(0.34,1.56,0.64,1)" : "none",
+                  transition: animating ? "left 0.3s cubic-bezier(0.34,1.56,0.64,1), top 0.3s cubic-bezier(0.34,1.56,0.64,1)" : "none",
                   width: 44, height: 44,
                   display: "flex", alignItems: "center", justifyContent: "center",
                 }}
