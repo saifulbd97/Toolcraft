@@ -28,9 +28,39 @@ function defaultCorners(w: number, h: number): Corners {
   return [{ x: mx, y: my }, { x: w - mx, y: my }, { x: w - mx, y: h - my }, { x: mx, y: h - my }];
 }
 
-// ─── Auto-crop: lightweight pure-canvas edge detection ────────────────────────
-// Steps: thumbnail → contrast boost → Sobel → axis projections → boundary find
-// Falls back to default corners if detection is not confident.
+// ─── Geometry helpers ─────────────────────────────────────────────────────────
+function convexHullPts(pts: Pt[]): Pt[] {
+  if (pts.length < 3) return pts;
+  const sorted = [...pts].sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (O: Pt, A: Pt, B: Pt) =>
+    (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x);
+  const lower: Pt[] = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0)
+      lower.pop();
+    lower.push(p);
+  }
+  const upper: Pt[] = [];
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0)
+      upper.pop();
+    upper.push(p);
+  }
+  upper.pop(); lower.pop();
+  return [...lower, ...upper];
+}
+
+function quadArea(tl: Pt, tr: Pt, br: Pt, bl: Pt): number {
+  const cross2 = (ax: number, ay: number, bx: number, by: number) => ax * by - ay * bx;
+  const d1x = br.x - tl.x, d1y = br.y - tl.y;
+  const d2x = tr.x - bl.x, d2y = tr.y - bl.y;
+  return Math.abs(cross2(d1x, d1y, d2x, d2y)) / 2;
+}
+
+// ─── Auto-crop: improved pure-JS edge detection with convex hull ───────────────
+// Pipeline: thumbnail → local contrast norm → Sobel → hull of edge pixels
+// → 4-corner extraction via x+y / x-y diagonals. Works on rotated documents.
 function autoDetectCorners(canvas: HTMLCanvasElement): Corners {
   const MAX = 320;
   const scale = Math.min(1, MAX / Math.max(canvas.width, canvas.height));
@@ -43,142 +73,85 @@ function autoDetectCorners(canvas: HTMLCanvasElement): Corners {
   ctx.drawImage(canvas, 0, 0, tw, th);
   const { data } = ctx.getImageData(0, 0, tw, th);
 
-  // Step 1: grayscale + contrast boost (S-curve style: clamp tails, stretch mid)
+  // Step 1: grayscale
   const gray = new Uint8Array(tw * th);
   for (let i = 0; i < tw * th; i++) {
     const j = i * 4;
-    let lum = 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
-    // Boost contrast: pull towards extremes
-    lum = (lum - 128) * 2.2 + 128;
-    gray[i] = Math.min(255, Math.max(0, lum));
+    gray[i] = Math.round(0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2]);
   }
 
-  // Step 2: Sobel edge magnitude
+  // Step 2: local contrast normalisation (32×32 blocks, CLAHE-style)
+  const norm = new Uint8Array(tw * th);
+  const BLOCK = 32;
+  for (let by = 0; by < th; by += BLOCK) {
+    for (let bx = 0; bx < tw; bx += BLOCK) {
+      const bw = Math.min(BLOCK, tw - bx), bh = Math.min(BLOCK, th - by);
+      let sum = 0, n = 0;
+      for (let y = by; y < by + bh; y++)
+        for (let x = bx; x < bx + bw; x++) { sum += gray[y * tw + x]; n++; }
+      const mean = sum / n;
+      for (let y = by; y < by + bh; y++)
+        for (let x = bx; x < bx + bw; x++) {
+          const idx = y * tw + x;
+          norm[idx] = Math.min(255, Math.max(0, (gray[idx] - mean) * 2.5 + 128));
+        }
+    }
+  }
+
+  // Step 3: Sobel edge magnitude
   const edges = new Uint8Array(tw * th);
   for (let y = 1; y < th - 1; y++) {
     for (let x = 1; x < tw - 1; x++) {
       const gx =
-        -gray[(y - 1) * tw + x - 1] + gray[(y - 1) * tw + x + 1] +
-        -2 * gray[y * tw + x - 1]   + 2 * gray[y * tw + x + 1] +
-        -gray[(y + 1) * tw + x - 1] + gray[(y + 1) * tw + x + 1];
+        -norm[(y-1)*tw+x-1] + norm[(y-1)*tw+x+1] +
+        -2*norm[y*tw+x-1]   + 2*norm[y*tw+x+1] +
+        -norm[(y+1)*tw+x-1] + norm[(y+1)*tw+x+1];
       const gy =
-        gray[(y - 1) * tw + x - 1] + 2 * gray[(y - 1) * tw + x] + gray[(y - 1) * tw + x + 1] +
-        -gray[(y + 1) * tw + x - 1] - 2 * gray[(y + 1) * tw + x] - gray[(y + 1) * tw + x + 1];
+        norm[(y-1)*tw+x-1] + 2*norm[(y-1)*tw+x] + norm[(y-1)*tw+x+1] +
+        -norm[(y+1)*tw+x-1] - 2*norm[(y+1)*tw+x] - norm[(y+1)*tw+x+1];
       edges[y * tw + x] = Math.min(255, Math.sqrt(gx * gx + gy * gy));
     }
   }
 
-  const EDGE_THR = 40;
+  // Step 4: collect strong edge pixels (skip 3% border)
+  const EDGE_THR = 35;
+  const bdr = Math.round(Math.min(tw, th) * 0.03);
+  const edgePts: Pt[] = [];
+  for (let y = bdr; y < th - bdr; y++)
+    for (let x = bdr; x < tw - bdr; x++)
+      if (edges[y * tw + x] > EDGE_THR) edgePts.push({ x, y });
 
-  // Step 3: project edge counts onto each axis
-  const projX = new Float32Array(tw);
-  const projY = new Float32Array(th);
-  for (let y = 0; y < th; y++) {
-    for (let x = 0; x < tw; x++) {
-      if (edges[y * tw + x] > EDGE_THR) { projX[x]++; projY[y]++; }
-    }
+  if (edgePts.length < 8) return defaultCorners(canvas.width, canvas.height);
+
+  // Step 5: subsample if too many, then convex hull
+  let pts = edgePts;
+  if (pts.length > 600) {
+    const step = Math.ceil(pts.length / 600);
+    pts = pts.filter((_, i) => i % step === 0);
+  }
+  const hull = convexHullPts(pts);
+  if (hull.length < 4) return defaultCorners(canvas.width, canvas.height);
+
+  // Step 6: extract 4 corners via diagonal extremes (handles rotation)
+  let tl = hull[0], tr = hull[0], br = hull[0], bl = hull[0];
+  for (const p of hull) {
+    if (p.x + p.y < tl.x + tl.y) tl = p;
+    if (p.x - p.y > tr.x - tr.y) tr = p;
+    if (p.x + p.y > br.x + br.y) br = p;
+    if (p.x - p.y < bl.x - bl.y) bl = p;
   }
 
-  // Smooth projections (3-tap)
-  for (let i = 1; i < tw - 1; i++) projX[i] = (projX[i - 1] + projX[i] + projX[i + 1]) / 3;
-  for (let i = 1; i < th - 1; i++) projY[i] = (projY[i - 1] + projY[i] + projY[i + 1]) / 3;
-
-  // Step 4: background colour from the 4 tiny corner patches
-  let bgSum = 0, bgN = 0;
-  const patchR = Math.max(2, Math.round(Math.min(tw, th) * 0.04));
-  for (const [px, py] of [[0, 0], [tw - patchR, 0], [0, th - patchR], [tw - patchR, th - patchR]]) {
-    for (let dy = 0; dy < patchR; dy++) {
-      for (let dx = 0; dx < patchR; dx++) {
-        const j = ((py + dy) * tw + px + dx) * 4;
-        bgSum += 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
-        bgN++;
-      }
-    }
-  }
-  const bgLum = bgSum / bgN;
-
-  // Step 5: scan inward from each edge, pick first strong edge line
-  // Require edge density >= 3% of perpendicular dimension
-  const xReq = th * 0.03;
-  const yReq = tw * 0.03;
-
-  const margin = 0.04; // don't pick a boundary closer than 4% to the edge
-  let left = Math.round(tw * margin);
-  let right = Math.round(tw * (1 - margin));
-  let top = Math.round(th * margin);
-  let bottom = Math.round(th * (1 - margin));
-
-  const mid = { x: tw / 2, y: th / 2 };
-
-  for (let x = Math.round(tw * margin); x < mid.x; x++) {
-    if (projX[x] >= xReq) { left = x; break; }
-  }
-  for (let x = Math.round(tw * (1 - margin)); x > mid.x; x--) {
-    if (projX[x] >= xReq) { right = x; break; }
-  }
-  for (let y = Math.round(th * margin); y < mid.y; y++) {
-    if (projY[y] >= yReq) { top = y; break; }
-  }
-  for (let y = Math.round(th * (1 - margin)); y > mid.y; y--) {
-    if (projY[y] >= yReq) { bottom = y; break; }
-  }
-
-  // Step 6: background-diff scan refines the box if detected box is too large
-  // Scan each column/row for where background colour switches to document colour
-  const BG_DIFF = bgLum > 160 ? 35 : 40; // more sensitive for light backgrounds
-  const refineX = (startX: number, endX: number, dir: 1 | -1): number => {
-    for (let x = startX; dir === 1 ? x < endX : x > endX; x += dir) {
-      let diffSum = 0;
-      const samples = Math.min(20, th);
-      const step = Math.floor(th / samples);
-      for (let y = 0; y < th; y += step) {
-        const j = (y * tw + x) * 4;
-        const lum = 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
-        diffSum += Math.abs(lum - bgLum);
-      }
-      if (diffSum / samples > BG_DIFF) return x;
-    }
-    return startX;
-  };
-  const refineY = (startY: number, endY: number, dir: 1 | -1): number => {
-    for (let y = startY; dir === 1 ? y < endY : y > endY; y += dir) {
-      let diffSum = 0;
-      const samples = Math.min(20, tw);
-      const step = Math.floor(tw / samples);
-      for (let x = 0; x < tw; x += step) {
-        const j = (y * tw + x) * 4;
-        const lum = 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
-        diffSum += Math.abs(lum - bgLum);
-      }
-      if (diffSum / samples > BG_DIFF) return y;
-    }
-    return startY;
-  };
-
-  const bgLeft   = refineX(Math.round(tw * margin), Math.round(tw * 0.5), 1);
-  const bgRight  = refineX(Math.round(tw * (1 - margin)), Math.round(tw * 0.5), -1);
-  const bgTop    = refineY(Math.round(th * margin), Math.round(th * 0.5), 1);
-  const bgBottom = refineY(Math.round(th * (1 - margin)), Math.round(th * 0.5), -1);
-
-  // Blend: take the inner boundary (tighter crop) from both signals
-  const pad = 2; // 2 thumbnail pixels padding so we don't cut right at the edge
-  const fl = Math.min(left, bgLeft) + pad;
-  const fr = Math.max(right, bgRight) - pad;
-  const ft = Math.min(top, bgTop) + pad;
-  const fb = Math.max(bottom, bgBottom) - pad;
-
-  // Confidence check: if detected region is impossibly small, fall back
-  if (fr - fl < tw * 0.15 || fb - ft < th * 0.15) {
+  // Step 7: confidence — quad area must be ≥ 10% of frame
+  if (quadArea(tl, tr, br, bl) < tw * th * 0.10)
     return defaultCorners(canvas.width, canvas.height);
-  }
 
   const sx = canvas.width / tw;
   const sy = canvas.height / th;
   return [
-    { x: fl * sx, y: ft * sy },
-    { x: fr * sx, y: ft * sy },
-    { x: fr * sx, y: fb * sy },
-    { x: fl * sx, y: fb * sy },
+    { x: tl.x * sx, y: tl.y * sy },
+    { x: tr.x * sx, y: tr.y * sy },
+    { x: br.x * sx, y: br.y * sy },
+    { x: bl.x * sx, y: bl.y * sy },
   ];
 }
 
@@ -193,16 +166,15 @@ function orderCorners(pts: Pt[]): Corners {
   return [tl, rem[1], br, rem[0]];
 }
 
-// ─── OpenCV-based document detection (CamScanner-style) ──────────────────────
-// Pipeline: grayscale → blur → Canny → dilate → findContours → largest quad
-// Tries multiple Canny threshold pairs to handle varying contrast conditions.
-// Async because it awaits the OpenCV WASM load (already started on mount).
+// ─── OpenCV-based document detection (CamScanner-style, improved) ────────────
+// Pipeline: grayscale → CLAHE → GaussianBlur → Canny (auto-tuned) →
+//           morphological closing → findContours (RETR_LIST + RETR_EXTERNAL) →
+//           largest 4-8pt quad → convex hull → 4-corner extraction
 async function autoDetectCornersWithCV(canvas: HTMLCanvasElement): Promise<Corners | null> {
   await loadOpenCV();
   const cv = (window as any).cv;
   if (!cv?.Mat) return null;
 
-  // Work on a downscaled copy (800px max) for speed
   const MAX = 800;
   const scale = Math.min(1, MAX / Math.max(canvas.width, canvas.height));
   const tw = Math.round(canvas.width * scale);
@@ -220,35 +192,37 @@ async function autoDetectCornersWithCV(canvas: HTMLCanvasElement): Promise<Corne
 
   try {
     const mat = t(cv.imread(src));
-
-    // Grayscale
     const gray = t(new cv.Mat());
     cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
 
-    // Gaussian blur — removes noise before edge detection
+    // CLAHE: contrast-limit adaptive histogram equalisation — handles shadows
+    let normalized = gray;
+    try {
+      const clahe = cv.createCLAHE(2.0, new cv.Size(8, 8));
+      const claheOut = t(new cv.Mat());
+      clahe.apply(gray, claheOut);
+      clahe.delete();
+      normalized = claheOut;
+    } catch { /* CLAHE unavailable — fall through with raw gray */ }
+
     const blurred = t(new cv.Mat());
-    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    cv.GaussianBlur(normalized, blurred, new cv.Size(5, 5), 0);
 
-    // Try progressively lower Canny thresholds (high-contrast first)
-    const threshPairs: [number, number][] = [[75, 200], [50, 150], [30, 90], [15, 50]];
-    const minArea = tw * th * 0.08; // ignore contours < 8% of frame
+    // Auto-tune Canny thresholds via Otsu's method (ignores unused result)
+    const otsuTmp = t(new cv.Mat());
+    const otsuT = cv.threshold(blurred, otsuTmp, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+    const autoHigh = Math.max(50, otsuT * 0.75);
 
-    for (const [low, high] of threshPairs) {
-      const edges = t(new cv.Mat());
-      cv.Canny(blurred, edges, low, high);
+    const threshPairs: [number, number][] = [
+      [autoHigh * 0.4, autoHigh],   // Otsu-guided (best for the actual image)
+      [75, 200], [50, 150], [30, 90], [15, 50],
+    ];
+    const minArea = tw * th * 0.08;
 
-      // Dilate to close small gaps in document border
-      const kernel = t(cv.Mat.ones(3, 3, cv.CV_8U));
-      const dilated = t(new cv.Mat());
-      cv.dilate(edges, dilated, kernel);
-
-      const contours = t(new cv.MatVector());
-      const hierarchy = t(new cv.Mat());
-      cv.findContours(dilated, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
-
-      let bestQuad: Pt[] | null = null;
+    // Extract 4-corner quad from a contour set (accepts 4-8 pt polygons)
+    const findBestQuad = (contours: any): Pt[] | null => {
+      let best: Pt[] | null = null;
       let bestArea = 0;
-
       for (let i = 0; i < contours.size(); i++) {
         const c = contours.get(i);
         const area = cv.contourArea(c);
@@ -258,23 +232,62 @@ async function autoDetectCornersWithCV(canvas: HTMLCanvasElement): Promise<Corne
         const approx = new cv.Mat();
         cv.approxPolyDP(c, approx, 0.02 * peri, true);
 
-        if (approx.rows === 4 && cv.isContourConvex(approx) && area > bestArea) {
+        if (approx.rows >= 4 && approx.rows <= 8 && area > bestArea) {
           bestArea = area;
-          const d = approx.data32S;
-          bestQuad = [
-            { x: d[0], y: d[1] }, { x: d[2], y: d[3] },
-            { x: d[4], y: d[5] }, { x: d[6], y: d[7] },
-          ];
+          // Compute convex hull of the approximated polygon
+          const hullMat = new cv.Mat();
+          try {
+            cv.convexHull(approx, hullMat, false, true);
+            const hPts: Pt[] = [];
+            for (let j = 0; j < hullMat.rows; j++)
+              hPts.push({ x: hullMat.data32S[j * 2], y: hullMat.data32S[j * 2 + 1] });
+
+            if (hPts.length >= 4) {
+              // Pick the 4 extreme corners via diagonal sums/diffs
+              let tl = hPts[0], tr = hPts[0], br = hPts[0], bl = hPts[0];
+              for (const p of hPts) {
+                if (p.x + p.y < tl.x + tl.y) tl = p;
+                if (p.x - p.y > tr.x - tr.y) tr = p;
+                if (p.x + p.y > br.x + br.y) br = p;
+                if (p.x - p.y < bl.x - bl.y) bl = p;
+              }
+              best = [tl, tr, br, bl];
+            }
+          } catch { /* hull failed — skip */ }
+          hullMat.delete();
         }
         approx.delete();
         c.delete();
       }
+      return best;
+    };
 
-      if (bestQuad) {
-        const ordered = orderCorners(bestQuad);
-        const sx = canvas.width / tw;
-        const sy = canvas.height / th;
-        const result = ordered.map(p => ({
+    for (const [low, high] of threshPairs) {
+      const edgeMat = t(new cv.Mat());
+      cv.Canny(blurred, edgeMat, low, high);
+
+      // Morphological closing: dilate then erode — fills broken edge gaps
+      const kernel = t(cv.Mat.ones(3, 3, cv.CV_8U));
+      const dilated = t(new cv.Mat());
+      const closed  = t(new cv.Mat());
+      cv.dilate(edgeMat, dilated, kernel);
+      cv.erode(dilated, closed, kernel);
+
+      // Pass 1: RETR_LIST
+      const c1 = t(new cv.MatVector()), h1 = t(new cv.Mat());
+      cv.findContours(closed, c1, h1, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+      let quad = findBestQuad(c1);
+
+      // Pass 2: RETR_EXTERNAL if nothing found
+      if (!quad) {
+        const c2 = t(new cv.MatVector()), h2 = t(new cv.Mat());
+        cv.findContours(closed, c2, h2, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        quad = findBestQuad(c2);
+      }
+
+      if (quad) {
+        const sx = canvas.width / tw, sy = canvas.height / th;
+        const result = quad.map(p => ({
           x: Math.max(0, Math.min(canvas.width,  p.x * sx)),
           y: Math.max(0, Math.min(canvas.height, p.y * sy)),
         })) as Corners;
@@ -284,7 +297,7 @@ async function autoDetectCornersWithCV(canvas: HTMLCanvasElement): Promise<Corne
     }
 
     cleanup();
-    return null; // trigger fallback
+    return null;
   } catch (e) {
     console.warn("[AutoCrop CV]", e);
     cleanup();
@@ -670,6 +683,8 @@ export default function Scanner() {
   const wrapRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const qrTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const liveCanvasRef = useRef<HTMLCanvasElement>(null);
+  const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
 
   // Load OpenCV silently in the background (for warp + enhance only)
@@ -702,6 +717,79 @@ export default function Scanner() {
     else { video.addEventListener("loadedmetadata", onMeta, { once: true }); }
     return () => video.removeEventListener("loadedmetadata", onMeta);
   }, [phase]);
+
+  // Live corner overlay — runs during camera preview (non-QR modes)
+  useEffect(() => {
+    if (!camReady || scannerMode === "qr" || phase !== "scanning") return;
+    const overlayCanvas = liveCanvasRef.current;
+    if (!overlayCanvas) return;
+
+    const timer = setInterval(() => {
+      const v = videoRef.current;
+      if (!v || !v.videoWidth) return;
+
+      // Size canvas to match its CSS-rendered area
+      const rect = overlayCanvas.getBoundingClientRect();
+      if (rect.width === 0) return;
+      overlayCanvas.width  = rect.width;
+      overlayCanvas.height = rect.height;
+      const ctx = overlayCanvas.getContext("2d")!;
+      ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+      // Grab a tiny frame for fast detection
+      const MAX = 320;
+      const tscale = Math.min(1, MAX / Math.max(v.videoWidth, v.videoHeight));
+      const tw = Math.round(v.videoWidth  * tscale);
+      const th = Math.round(v.videoHeight * tscale);
+      const tmp = document.createElement("canvas");
+      tmp.width = tw; tmp.height = th;
+      tmp.getContext("2d")!.drawImage(v, 0, 0, tw, th);
+
+      const detected = autoDetectCorners(tmp);
+
+      // Confidence: if corners barely moved from defaults, skip drawing
+      const def = modeDefaultCorners(tw, th, scannerMode);
+      const maxDiff = Math.max(...detected.map((c, i) =>
+        Math.hypot(c.x - def[i].x, c.y - def[i].y)
+      ));
+      if (maxDiff < tw * 0.06) return;
+
+      // Map thumbnail coords → canvas display coords
+      const mx = (c: Pt) => ({ x: (c.x / tw) * overlayCanvas.width, y: (c.y / th) * overlayCanvas.height });
+      const pts = detected.map(mx);
+
+      // Draw quad fill
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      pts.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
+      ctx.closePath();
+      ctx.fillStyle   = "rgba(34,197,94,0.15)";
+      ctx.strokeStyle = "rgba(34,197,94,0.90)";
+      ctx.lineWidth   = 2;
+      ctx.fill();
+      ctx.stroke();
+
+      // Draw corner dots
+      pts.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+        ctx.fillStyle   = "#22c55e";
+        ctx.fill();
+        ctx.strokeStyle = "white";
+        ctx.lineWidth   = 1.5;
+        ctx.stroke();
+      });
+    }, 800);
+
+    liveTimerRef.current = timer;
+    return () => {
+      clearInterval(timer);
+      liveTimerRef.current = null;
+      // Clear the overlay when effect tears down
+      const c = liveCanvasRef.current;
+      if (c) c.getContext("2d")?.clearRect(0, 0, c.width, c.height);
+    };
+  }, [camReady, scannerMode, phase]);
 
   // QR scanning loop
   useEffect(() => {
@@ -1218,6 +1306,15 @@ export default function Scanner() {
           <div className="relative flex-1 bg-black overflow-hidden">
             <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
 
+            {/* Live document detection overlay */}
+            {camReady && scannerMode !== "qr" && (
+              <canvas
+                ref={liveCanvasRef}
+                className="absolute inset-0 w-full h-full pointer-events-none z-10"
+                style={{ mixBlendMode: "normal" }}
+              />
+            )}
+
             {/* Spinner while camera initialises */}
             {!camReady && (
               <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 z-10 gap-3">
@@ -1309,7 +1406,7 @@ export default function Scanner() {
                   🔒 1.6:1 ratio locked
                 </span>
               )}
-              {autoDetected && scannerMode !== "id" && (
+              {!detecting && scannerMode !== "id" && (
                 <button
                   onClick={async () => {
                     setDetecting(true);
@@ -1317,11 +1414,12 @@ export default function Scanner() {
                       const detected = await detectDocumentCorners(captured);
                       setAnimating(true);
                       setCorners(detected);
+                      setAutoDetected(true);
                       setTimeout(() => setAnimating(false), 500);
                     } catch { /* keep */ }
                     setDetecting(false);
                   }}
-                  className="text-xs text-green-600 underline hover:text-green-800 shrink-0"
+                  className={`text-xs underline shrink-0 ${autoDetected ? "text-green-600 hover:text-green-800" : "text-indigo-600 hover:text-indigo-800"}`}
                 >
                   Re-detect
                 </button>
@@ -1383,7 +1481,7 @@ export default function Scanner() {
               })}
             </svg>
 
-            {/* Corner handle dots — CSS transition for smooth snap animation */}
+            {/* Corner handle dots — 44×44px touch targets with spring snap animation */}
             {corners.map((c, i) => (
               <div
                 key={i}
@@ -1393,11 +1491,13 @@ export default function Scanner() {
                   top: `${(c.y / captured.height) * 100}%`,
                   transform: "translate(-50%, -50%)",
                   transition: animating ? "left 0.4s cubic-bezier(0.34,1.56,0.64,1), top 0.4s cubic-bezier(0.34,1.56,0.64,1)" : "none",
+                  width: 44, height: 44,
+                  display: "flex", alignItems: "center", justifyContent: "center",
                 }}
                 onPointerDown={e => onPtrDown(e, i)}
               >
-                <div className="w-10 h-10 rounded-full flex items-center justify-center bg-white/20">
-                  <div className={`w-6 h-6 rounded-full border-2 border-white shadow-lg transition-colors ${autoDetected ? "bg-green-500" : "bg-indigo-600"}`} />
+                <div className="w-11 h-11 rounded-full flex items-center justify-center bg-white/20">
+                  <div className={`w-7 h-7 rounded-full border-2 border-white shadow-lg transition-colors ${autoDetected ? "bg-green-500" : "bg-indigo-600"}`} />
                 </div>
               </div>
             ))}
