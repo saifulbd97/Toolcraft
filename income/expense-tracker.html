@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="bn">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Expense Tracker</title>
+  <style>
+    /* Basic styles — try to keep compatible with your existing design. Replace/merge with your CSS as needed */
+    body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; background:#f6f7fb; color:#111; margin:0; padding:18px; }
+    .container { max-width:980px; margin:18px auto; background:#fff; padding:18px; border-radius:10px; box-shadow:0 2px 6px rgba(0,0,0,0.06); }
+    h1 { margin-top:0; }
+    form input, form select, form button, form textarea { font-size:1rem; padding:8px; margin:6px 0; }
+    .auth-container { max-width:420px; margin:30px auto; padding:18px; border-radius:8px; background:rgba(255,255,255,0.98); }
+    .auth-form input { display:block; width:100%; margin:6px 0; padding:8px; }
+    .auth-form button { padding:8px 12px; }
+    #logout-btn { margin-left:12px; }
+    #entries-list { margin-top:12px; }
+    .entry { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #eee; }
+    .entry .meta { color:#666; font-size:0.9rem; }
+    .controls button { margin-left:8px; }
+  </style>
+</head>
+<body>
+  <!-- Firebase CDN (compat) -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+
+  <!-- AUTH UI (appear when not logged in) -->
+  <div id="auth-app" style="display:none;">
+    <div class="auth-container">
+      <h2>Login / Sign up</h2>
+
+      <form id="signup-form" class="auth-form" onsubmit="return false;">
+        <h3>Sign up</h3>
+        <input id="signup-email" type="email" placeholder="Email" required>
+        <input id="signup-password" type="password" placeholder="Password" required>
+        <button id="signup-btn" type="button">Sign up</button>
+      </form>
+
+      <form id="login-form" class="auth-form" onsubmit="return false;">
+        <h3>Login</h3>
+        <input id="login-email" type="email" placeholder="Email" required>
+        <input id="login-password" type="password" placeholder="Password" required>
+        <button id="login-btn" type="button">Login</button>
+      </form>
+
+      <p><a href="#" id="forgot-password-link">পাসওয়ার্ড ভুলে গেছেন?</a></p>
+      <div id="auth-message" style="color:crimson;"></div>
+    </div>
+  </div>
+
+  <!-- TRACKER UI (shown only when logged in) -->
+  <div id="tracker-app" style="display:none;">
+    <div class="container">
+      <!-- LOGOUT and user info -->
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h1>Expense Tracker</h1>
+        <div>
+          <span id="user-email" style="margin-right:12px; font-size:0.9rem; color:#333"></span>
+          <button id="logout-btn">Logout</button>
+        </div>
+      </div>
+
+      <!-- Entry form: keep ids so JS can hook in -->
+      <form id="entry-form" onsubmit="return false;">
+        <label>
+          Type:
+          <select id="entry-type">
+            <option value="income">Income</option>
+            <option value="expense">Expense</option>
+          </select>
+        </label>
+        <label>
+          Amount:
+          <input id="entry-amount" type="number" step="0.01" required>
+        </label>
+        <label>
+          Category:
+          <input id="entry-category" type="text" placeholder="Salary, Food, Rent...">
+        </label>
+        <label>
+          Date:
+          <input id="entry-date" type="date" required>
+        </label>
+        <label>
+          Note:
+          <textarea id="entry-note" rows="2" placeholder="optional"></textarea>
+        </label>
+        <button id="add-entry-btn" type="button">Add Entry</button>
+      </form>
+
+      <!-- Summary & chart placeholder (you may integrate your chart lib) -->
+      <div id="summary" style="margin-top:12px;">
+        <strong>Total Income:</strong> <span id="total-income">0</span>
+        &nbsp;&nbsp; <strong>Total Expense:</strong> <span id="total-expense">0</span>
+        &nbsp;&nbsp; <strong>Balance:</strong> <span id="balance">0</span>
+      </div>
+
+      <!-- Entries list -->
+      <div id="entries-list"></div>
+    </div>
+  </div>
+
+  <script>
+    // --- Firebase config (from user) ---
+    const firebaseConfig = {
+      apiKey: "AIzaSyDMMZWhIeYib5kkaM_uHTefVKTJnXxcQDw",
+      authDomain: "toolsono-login.firebaseapp.com",
+      projectId: "toolsono-login",
+      storageBucket: "toolsono-login.firebasestorage.app",
+      messagingSenderId: "312813703460",
+      appId: "1:312813703460:web:2b4fa1d53ee015708c63b1",
+      measurementId: "G-4NRCYPL4N3"
+    };
+
+    // Initialize Firebase (compat)
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+
+    // UI elements refs
+    const authApp = document.getElementById('auth-app');
+    const trackerApp = document.getElementById('tracker-app');
+    const authMessage = document.getElementById('auth-message');
+    const userEmailEl = document.getElementById('user-email');
+
+    // Entry form elements
+    const entryForm = document.getElementById('entry-form');
+    const typeEl = document.getElementById('entry-type');
+    const amountEl = document.getElementById('entry-amount');
+    const categoryEl = document.getElementById('entry-category');
+    const dateEl = document.getElementById('entry-date');
+    const noteEl = document.getElementById('entry-note');
+    const addBtn = document.getElementById('add-entry-btn');
+    const entriesList = document.getElementById('entries-list');
+    const totalIncomeEl = document.getElementById('total-income');
+    const totalExpenseEl = document.getElementById('total-expense');
+    const balanceEl = document.getElementById('balance');
+
+    // Auth state change
+    let unsubscribeEntries = null;
+    auth.onAuthStateChanged(async user => {
+      if (user) {
+        authApp.style.display = 'none';
+        trackerApp.style.display = 'block';
+        userEmailEl.textContent = user.email || '';
+        startUserListeners(user.uid);
+        // Optional: migrate localStorage data
+        // await migrateLocalToFirestore();
+      } else {
+        authApp.style.display = 'block';
+        trackerApp.style.display = 'none';
+        userEmailEl.textContent = '';
+        stopUserListeners();
+      }
+    });
+
+    // Signup
+    document.getElementById('signup-btn').addEventListener('click', async () => {
+      const email = document.getElementById('signup-email').value;
+      const password = document.getElementById('signup-password').value;
+      authMessage.textContent = '';
+      try {
+        await auth.createUserWithEmailAndPassword(email, password);
+      } catch (err) {
+        authMessage.textContent = err.message;
+      }
+    });
+
+    // Login
+    document.getElementById('login-btn').addEventListener('click', async () => {
+      const email = document.getElementById('login-email').value;
+      const password = document.getElementById('login-password').value;
+      authMessage.textContent = '';
+      try {
+        await auth.signInWithEmailAndPassword(email, password);
+      } catch (err) {
+        authMessage.textContent = err.message;
+      }
+    });
+
+    // Logout
+    document.getElementById('logout-btn').addEventListener('click', () => {
+      auth.signOut();
+    });
+
+    // Password reset
+    document.getElementById('forgot-password-link').addEventListener('click', async (e) => {
+      e.preventDefault();
+      const email = prompt('পাসওয়ার্ড রিসেট করতে ইমেইল দিন:');
+      if (!email) return;
+      try {
+        await auth.sendPasswordResetEmail(email);
+        alert('Reset link পাঠানো হয়েছে — ইমেইল চেক করুন।');
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    });
+
+    // Firestore per-user collection: /users/{uid}/entries
+    function startUserListeners(uid) {
+      unsubscribeEntries = db.collection('users').doc(uid)
+        .collection('entries')
+        .orderBy('createdAt', 'desc')
+        .onSnapshot(snapshot => {
+          const entries = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+          renderEntries(entries);
+        }, err => console.error('onSnapshot error', err));
+    }
+    function stopUserListeners() {
+      if (unsubscribeEntries) { unsubscribeEntries(); unsubscribeEntries = null; }
+      entriesList.innerHTML = '';
+      totalIncomeEl.textContent = '0';
+      totalExpenseEl.textContent = '0';
+      balanceEl.textContent = '0';
+    }
+
+    // CRUD helpers
+    async function addEntry(entry) {
+      const user = auth.currentUser;
+      if (!user) throw new Error('No authenticated user');
+      await db.collection('users').doc(user.uid)
+        .collection('entries')
+        .add({ ...entry, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+    }
+    async function updateEntry(entryId, updates) {
+      const user = auth.currentUser;
+      if (!user) throw new Error('No authenticated user');
+      await db.collection('users').doc(user.uid).collection('entries').doc(entryId).update(updates);
+    }
+    async function deleteEntry(entryId) {
+      const user = auth.currentUser;
+      if (!user) throw new Error('No authenticated user');
+      await db.collection('users').doc(user.uid).collection('entries').doc(entryId).delete();
+    }
+
+    // Form submit: add entry
+    addBtn.addEventListener('click', async () => {
+      const type = typeEl.value;
+      const amount = parseFloat(amountEl.value) || 0;
+      const category = categoryEl.value || '';
+      const date = dateEl.value || new Date().toISOString().slice(0,10);
+      const note = noteEl.value || '';
+      if (!amount || amount <= 0) { alert('Amount must be > 0'); return; }
+      try {
+        await addEntry({ type, amount, category, date, note });
+        // clear form
+        amountEl.value = '';
+        categoryEl.value = '';
+        noteEl.value = '';
+      } catch (e) {
+        alert('Error saving entry: ' + e.message);
+      }
+    });
+
+    // Render entries into the list and compute summary
+    function renderEntries(entries) {
+      entriesList.innerHTML = '';
+      let totalIncome = 0, totalExpense = 0;
+      entries.forEach(en => {
+        if (en.type === 'income') totalIncome += (en.amount || 0);
+        else totalExpense += (en.amount || 0);
+
+        const div = document.createElement('div');
+        div.className = 'entry';
+        const left = document.createElement('div');
+        left.innerHTML = `<div><strong>${en.type === 'income' ? 'Income' : 'Expense'}</strong> — ${en.amount}</div><div class="meta">${en.category || ''} • ${en.date || ''}</div>`;
+        const right = document.createElement('div');
+        right.className = 'controls';
+        const del = document.createElement('button'); del.textContent = 'Delete';
+        del.addEventListener('click', async () => {
+          if (confirm('Delete this entry?')) await deleteEntry(en.id);
+        });
+        const edit = document.createElement('button'); edit.textContent = 'Edit';
+        edit.addEventListener('click', () => openEditPrompt(en));
+        right.appendChild(edit); right.appendChild(del);
+        div.appendChild(left); div.appendChild(right);
+        entriesList.appendChild(div);
+      });
+      totalIncomeEl.textContent = totalIncome.toFixed(2);
+      totalExpenseEl.textContent = totalExpense.toFixed(2);
+      balanceEl.textContent = (totalIncome - totalExpense).toFixed(2);
+      // Optionally call chart redraw here using your chart lib
+    }
+
+    function openEditPrompt(entry) {
+      const newAmount = prompt('Amount', entry.amount);
+      if (newAmount === null) return;
+      const newCategory = prompt('Category', entry.category || '');
+      if (newCategory === null) return;
+      updateEntry(entry.id, { amount: parseFloat(newAmount), category: newCategory }).catch(e => alert('Update failed: ' + e.message));
+    }
+
+    // Optional migration helper
+    async function migrateLocalToFirestore(localStorageKey='my-expense-entries') {
+      try {
+        const local = localStorage.getItem(localStorageKey);
+        if (!local) return;
+        const items = JSON.parse(local);
+        for (const it of items) await addEntry(it);
+        // localStorage.removeItem(localStorageKey);
+      } catch (e) { console.warn('migration failed', e); }
+    }
+
+  </script>
+</body>
+</html>
