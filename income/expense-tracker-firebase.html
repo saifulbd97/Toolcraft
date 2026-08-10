@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="bn">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Expense Tracker (Firebase integrated)</title>
+  <!-- NOTE: This file is meant as a drop-in Firebase-enabled copy of your tracker.
+       It preserves minimal structure and IDs so you can reuse your existing CSS.
+       After I push this file, please replace the firebaseConfig placeholders below
+       with your actual config from the Firebase Console (Project settings → Your apps → SDK config).
+  -->
+  <style>
+    /* Minimal layout so the page is usable out-of-the-box.
+       Your repository's existing CSS will not be overwritten. You can remove or adapt these styles. */
+    body { font-family: system-ui, -apple-system, 'Noto Sans Bengali', 'Noto Sans', Arial, sans-serif; margin: 16px; }
+    .auth-box { max-width:420px; margin:12px auto; padding:12px; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+    input, select, button { font-size:16px; padding:8px; margin:6px 0; width:100%; box-sizing:border-box; }
+    #tracker-root { max-width:720px; margin:14px auto; }
+    #entriesList li { margin:6px 0; padding:6px; border-bottom:1px solid #eee; }
+    button.small { display:inline-block; width:auto; padding:6px 10px; }
+  </style>
+</head>
+<body>
+  <h1>Expense Tracker (Firebase)</h1>
+  <p>এই পেইজটি Firebase Authentication এবং Firestore ব্যবহার করে per-user income/expense সংরক্ষণ করে।</p>
+
+  <!-- AUTH CONTAINER: shown when user is NOT logged in -->
+  <div id="auth-container" style="display:none;">
+    <div class="auth-box">
+      <h2>Login / Sign up</h2>
+      <input id="emailInput" type="email" placeholder="Email" />
+      <input id="passwordInput" type="password" placeholder="Password" />
+      <div style="display:flex; gap:8px;">
+        <button id="signupBtn" class="small">Sign up</button>
+        <button id="loginBtn" class="small">Log in</button>
+        <button id="logoutBtn" class="small" style="display:none;">Log out</button>
+      </div>
+      <div><a href="#" id="resetPasswordLink">পাসওয়ার্ড ভুলে গেছেন?</a></div>
+      <div id="authMessage" style="color:red;"></div>
+    </div>
+  </div>
+
+  <!-- APP CONTAINER: shown when user IS logged in -->
+  <div id="app-container" style="display:none;">
+    <div style="max-width:720px; margin:0 auto;">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+        <div>
+          <strong id="userEmail"></strong>
+        </div>
+        <div>
+          <button id="logoutBtnTop" class="small">Log out</button>
+        </div>
+      </div>
+
+      <div id="tracker-root">
+        <form id="entryForm">
+          <label>Amount</label>
+          <input id="entryAmount" type="number" placeholder="Amount" required />
+          <label>Type</label>
+          <select id="entryType">
+            <option value="income">Income</option>
+            <option value="expense">Expense</option>
+          </select>
+          <label>Date</label>
+          <input id="entryDate" type="date" />
+          <label>Note</label>
+          <input id="entryNote" type="text" placeholder="Note (optional)" />
+          <button type="submit">Save</button>
+        </form>
+
+        <h3>Summary</h3>
+        <div id="summaryTotal">Total: ৳0</div>
+
+        <h3>Entries</h3>
+        <ul id="entriesList"></ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- Firebase CDN (compat build for simple script-tag usage) -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+
+  <script>
+    // ========= IMPORTANT: Replace the firebaseConfig object below with your project's config
+    // Get it from Firebase Console → Project settings → Your apps → SDK config
+    const firebaseConfig = {
+      apiKey: "REPLACE_WITH_API_KEY",
+      authDomain: "REPLACE_WITH_AUTH_DOMAIN",
+      projectId: "REPLACE_WITH_PROJECT_ID",
+      storageBucket: "REPLACE_WITH_STORAGE_BUCKET",
+      messagingSenderId: "REPLACE_WITH_MESSAGING_SENDER_ID",
+      appId: "REPLACE_WITH_APP_ID"
+    };
+    // ==================================================================
+
+    // Initialize Firebase
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const db = firebase.firestore();
+
+    // DOM refs
+    const authContainer = document.getElementById('auth-container');
+    const appContainer = document.getElementById('app-container');
+    const emailInput = document.getElementById('emailInput');
+    const passwordInput = document.getElementById('passwordInput');
+    const signupBtn = document.getElementById('signupBtn');
+    const loginBtn = document.getElementById('loginBtn');
+    const logoutBtn = document.getElementById('logoutBtn');
+    const logoutBtnTop = document.getElementById('logoutBtnTop');
+    const resetPasswordLink = document.getElementById('resetPasswordLink');
+    const authMessage = document.getElementById('authMessage');
+    const userEmail = document.getElementById('userEmail');
+
+    const entryForm = document.getElementById('entryForm');
+    const entryAmount = document.getElementById('entryAmount');
+    const entryType = document.getElementById('entryType');
+    const entryDate = document.getElementById('entryDate');
+    const entryNote = document.getElementById('entryNote');
+    const entriesList = document.getElementById('entriesList');
+    const summaryTotal = document.getElementById('summaryTotal');
+
+    let entriesUnsubscribe = null;
+
+    // Auth actions
+    signupBtn.addEventListener('click', async () => {
+      authMessage.textContent = '';
+      try {
+        const userCred = await auth.createUserWithEmailAndPassword(emailInput.value, passwordInput.value);
+        await userCred.user.sendEmailVerification();
+        authMessage.style.color = 'green';
+        authMessage.textContent = 'Sign up successful. একটি verification ইমেইল পাঠানো হয়েছে।';
+      } catch (err) {
+        authMessage.style.color = 'red';
+        authMessage.textContent = err.message;
+      }
+    });
+
+    loginBtn.addEventListener('click', async () => {
+      authMessage.textContent = '';
+      try {
+        await auth.signInWithEmailAndPassword(emailInput.value, passwordInput.value);
+      } catch (err) {
+        authMessage.style.color = 'red';
+        authMessage.textContent = err.message;
+      }
+    });
+
+    logoutBtn.addEventListener('click', async () => { await auth.signOut(); });
+    logoutBtnTop.addEventListener('click', async () => { await auth.signOut(); });
+
+    resetPasswordLink.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const email = emailInput.value || prompt('পাসওয়ার্ড রিসেট করার জন্য আপনার ইমেইল লিখুন:');
+      if (!email) return;
+      try {
+        await auth.sendPasswordResetEmail(email);
+        alert('Password reset ইমেইল পাঠানো হয়েছে। আপনার ইনবক্স চেক করুন।');
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
+    });
+
+    // Auth state listener
+    auth.onAuthStateChanged(user => {
+      if (user) {
+        authContainer.style.display = 'none';
+        appContainer.style.display = 'block';
+        userEmail.textContent = user.email || '';
+        startEntriesListener(user.uid);
+      } else {
+        authContainer.style.display = 'block';
+        appContainer.style.display = 'none';
+        userEmail.textContent = '';
+        if (entriesUnsubscribe) { entriesUnsubscribe(); entriesUnsubscribe = null; }
+      }
+    });
+
+    // Save entry to Firestore
+    entryForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const user = auth.currentUser;
+      if (!user) { alert('Please log in first.'); return; }
+      const amount = parseFloat(entryAmount.value) || 0;
+      const type = entryType.value;
+      const date = entryDate.value ? new Date(entryDate.value) : new Date();
+      const note = entryNote.value || '';
+      try {
+        await db.collection('entries').add({
+          userId: user.uid,
+          amount: amount,
+          type: type,
+          date: firebase.firestore.Timestamp.fromDate(date),
+          note: note,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        entryAmount.value = '';
+        entryNote.value = '';
+        entryDate.value = '';
+      } catch (err) {
+        alert('Error saving entry: ' + err.message);
+      }
+    });
+
+    // Real-time listener for user's entries
+    function startEntriesListener(uid) {
+      if (entriesUnsubscribe) entriesUnsubscribe();
+      entriesUnsubscribe = db.collection('entries')
+        .where('userId', '==', uid)
+        .orderBy('date', 'desc')
+        .onSnapshot(snapshot => {
+          const docs = [];
+          snapshot.forEach(doc => docs.push({ id: doc.id, ...doc.data() }));
+          renderEntries(docs);
+        }, err => { console.error('Listener error:', err); });
+    }
+
+    function renderEntries(docs) {
+      entriesList.innerHTML = '';
+      let total = 0;
+      docs.forEach(d => {
+        const li = document.createElement('li');
+        const date = d.date && d.date.toDate ? d.date.toDate().toLocaleDateString() : '';
+        li.textContent = `${date} — ${d.type} — ৳${d.amount} — ${d.note}`;
+        const del = document.createElement('button');
+        del.textContent = 'Delete';
+        del.className = 'small';
+        del.style.marginLeft = '8px';
+        del.addEventListener('click', async () => {
+          if (confirm('মুছে ফেলতে চান?')) {
+            try { await db.collection('entries').doc(d.id).delete(); }
+            catch (err) { alert('Error deleting: ' + err.message); }
+          }
+        });
+        li.appendChild(del);
+        entriesList.appendChild(li);
+        total += (d.type === 'income') ? d.amount : -d.amount;
+      });
+      summaryTotal.textContent = `Total: ৳${total.toFixed(2)}`;
+    }
+
+    // Helpful: remove any localStorage usage if you had it before. This file uses Firestore only.
+  </script>
+
+  <!-- End of file -->
+</body>
+</html>
